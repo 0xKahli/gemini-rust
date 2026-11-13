@@ -1650,14 +1650,17 @@ impl GeminiApp {
                             ui.add_space(8.0);
                             ui.separator();
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Developed by Kahli (@0xKahli)").size(11.5).color(Color32::from_rgb(120, 190, 255)).strong());
+                            ui.hyperlink_to(
+                                RichText::new("Developed by Kahli (@0xKahli)").size(11.5).color(Color32::from_rgb(120, 190, 255)).strong(),
+                                "https://github.com/0xKahli/gemini-rust",
+                            ).on_hover_text("https://github.com/0xKahli/gemini-rust");
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("GitHub:").size(10.5).color(Color32::from_gray(140)));
                                 ui.hyperlink_to(
                                     RichText::new("github.com/0xKahli/gemini-rust").size(10.5).color(Color32::from_rgb(100, 180, 255)),
                                     "https://github.com/0xKahli/gemini-rust",
-                                );
+                                ).on_hover_text("https://github.com/0xKahli/gemini-rust");
                             });
                         });
                 });

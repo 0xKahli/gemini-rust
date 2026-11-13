@@ -101,7 +101,7 @@ gemini-client/
 
 ## 👤 Author & Credits
 
-Developed by **Kahli** ([@0xKahli](https://github.com/0xKahli)).  
+Developed by [**Kahli (@0xKahli)**](https://github.com/0xKahli/gemini-rust).  
 Repository: [https://github.com/0xKahli/gemini-rust](https://github.com/0xKahli/gemini-rust)
 
 ---
