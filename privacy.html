@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en" class="dark scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy ✦ Rusty Gemini</title>
+  <meta name="description" content="Privacy Policy for Rusty Gemini desktop client. Local-first, zero telemetry, secure Windows DPAPI credential storage, and direct Google API communication.">
+  <link rel="icon" type="image/png" href="/assets/icon.png">
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            obsidian: '#0d0e11',
+            surface: '#131418',
+            card: '#181920',
+            borderDark: '#272935',
+            geminiBlue: '#3b82f6',
+            geminiPurple: '#8b5cf6',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+  
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+    body {
+      background-color: #0d0e11;
+      color: #e2e8f0;
+      font-family: 'Inter', sans-serif;
+    }
+    .gemini-gradient-text {
+      background: linear-gradient(135deg, #60a5fa 0%, #a855f7 50%, #38bdf8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-obsidian text-gray-200 selection:bg-blue-500/30 selection:text-blue-200">
+
+  <!-- ── Navigation ────────────────────────────────────────────────────────── -->
+  <header class="sticky top-0 z-50 w-full border-b border-borderDark/60 bg-obsidian/80 backdrop-blur-xl">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-3 group">
+        <img src="/assets/icon.png" alt="Rusty Gemini" class="w-8 h-8 rounded-lg shadow-md group-hover:scale-105 transition-transform">
+        <span class="font-bold text-lg text-white tracking-tight">Rusty Gemini</span>
+      </a>
+
+      <nav class="flex items-center gap-6 text-sm font-medium text-gray-300">
+        <a href="/" class="hover:text-white transition-colors">← Back to Home</a>
+        <a href="/terms" class="hover:text-white transition-colors">Terms of Service</a>
+        <a href="https://github.com/0xKahli/gemini-rust" target="_blank" rel="noopener noreferrer" 
+           class="inline-flex items-center gap-2 px-3 py-1 rounded-lg text-xs bg-white/5 hover:bg-white/10 text-gray-200 border border-white/10 transition-colors">
+          GitHub
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ── Content Container ────────────────────────────────────────────────── -->
+  <main class="max-w-4xl mx-auto px-4 sm:px-6 py-16 sm:py-20">
+    <div class="mb-12 border-b border-borderDark/60 pb-8">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold mb-4">
+        🔒 Official Policy Document
+      </div>
+      <h1 class="text-3xl sm:text-5xl font-extrabold text-white tracking-tight mb-4">
+        Privacy Policy
+      </h1>
+      <p class="text-gray-400 text-sm">
+        Last Updated & Effective: <span class="text-white font-medium">November 13, 2026</span>
+      </p>
+    </div>
+
+    <!-- Privacy Highlights Box -->
+    <div class="mb-12 p-6 rounded-2xl bg-surface/80 border border-blue-500/30 shadow-xl space-y-3">
+      <h3 class="text-white font-bold flex items-center gap-2">
+        <span class="text-blue-400 text-lg">✦</span> Summary of Core Principles
+      </h3>
+      <ul class="text-sm text-gray-300 space-y-2 list-disc list-inside">
+        <li><strong>Zero Telemetry & Tracking:</strong> Rusty Gemini collects absolutely zero telemetry, diagnostic logs, personal data, or usage metrics.</li>
+        <li><strong>No Intermediary Servers:</strong> We do not operate proxy servers, user databases, or backends. All network requests travel directly from your device to Google's official endpoints.</li>
+        <li><strong>Local-First Storage:</strong> Credentials and chat history reside exclusively on your local machine, secured via Windows Credential Manager and local user-level DPAPI encryption.</li>
+        <li><strong>100% Open Source:</strong> Every line of code is open source and auditable on <a href="https://github.com/0xKahli/gemini-rust" class="text-blue-400 hover:underline">GitHub</a>.</li>
+      </ul>
+    </div>
+
+    <!-- Body Sections -->
+    <div class="space-y-10 text-gray-300 text-sm leading-relaxed">
+
+      <!-- Section 1 -->
+      <section class="space-y-3">
+        <h2 class="text-xl font-bold text-white tracking-tight">1. Introduction</h2>
+        <p>
+          This Privacy Policy explains how <strong>Rusty Gemini</strong> ("the Application", "we", "our"), developed by <strong>Kahli</strong> (<a href="https://github.com/0xKahli" class="text-blue-400 hover:underline">@0xKahli</a>), handles information when you install, launch, or use the desktop client.
+        </p>
+        <p>
+          Rusty Gemini is an independent, native open-source Windows desktop application designed to provide a high-performance graphical interface for Google's Gemini models. Because privacy and user sovereignty are paramount, Rusty Gemini was engineered specifically to avoid external collection of user information.
+        </p>
+      </section>
+
+      <!-- Section 2 -->
+      <section class="space-y-3">
+        <h2 class="text-xl font-bold text-white tracking-tight">2. Information We Do Not Collect</h2>
+        <p>
+          Unlike web applications or commercial SaaS products, Rusty Gemini does <strong>not</strong> collect, harvest, store, or transmit:
+        </p>
+        <ul class="list-disc list-inside space-y-1.5 pl-2 text-gray-400">
+          <li>Personal identifying information (name, email address, phone number).</li>
+          <li>IP addresses, hardware UUIDs, or device telemetry.</li>
+          <li>Analytics, clickstream data, event logs, or error crash reports.</li>
+          <li>Your prompts, inputs, questions, code snippets, or attachment contents.</li>
+          <li>Your conversation histories or token consumption statistics.</li>
+        </ul>
+        <p>
+          No server operated by the application developer ever receives or observes your traffic.
+        </p>
+      </section>
+
+      <!-- Section 3 -->
+      <section class="space-y-3">
+        <h2 class="text-xl font-bold text-white tracking-tight">3. Google OAuth 2.0 PKCE & Credential Handling</h2>
+        <p>
+          To interact with Gemini models using your Google account, Rusty Gemini implements standard <strong>OAuth 2.0 with Proof Key for Code Exchange (PKCE)</strong> conforming to RFC 7636:
+        </p>
+        <ol class="list-decimal list-inside space-y-2 pl-2 text-gray-400">
+          <li><strong>Authentication Flow:</strong> When signing in, the application directs your system default web browser to Google's official OAuth authorization endpoint (<code class="text-blue-300">https://accounts.google.com/o/oauth2/v2/auth</code>). You enter your Google credentials directly into Google's domain; Rusty Gemini never sees or handles your Google password.</li>
+          <li><strong>Ephemeral Local Callback:</strong> The authorization code is received locally on your PC via a temporary loopback web server listening on <code class="text-blue-300">127.0.0.1:40772/oauth2callback</code> with CSRF state token verification. The loopback server terminates immediately once the exchange completes.</li>
+          <li><strong>Local Credential Storage:</strong> Retrieved access tokens and refresh tokens are stored strictly on your local machine across two layers:
+            <ul class="list-disc list-inside pl-6 pt-1 space-y-1">
+              <li>Windows Credential Manager via native Win32 APIs (<code class="text-blue-300">CredWriteW</code> / <code class="text-blue-300">CredReadW</code>).</li>
+              <li>Encrypted JSON file located at <code class="text-blue-300">%APPDATA%\gemini_client\auth.json</code>, protected by Windows Data Protection API (DPAPI) and Windows file permission controls.</li>
+            </ul>
+          </li>
+          <li><strong>Zero Remote Transmission:</strong> Your tokens are never transmitted to any third party other than Google's official token refresh endpoint (<code class="text-blue-300">https://oauth2.googleapis.com/token</code>).</li>
+        </ol>
+      </section>
+
+      <!-- Section 4 -->
+      <section class="space-y-3">
+        <h2 class="text-xl font-bold text-white tracking-tight">4. Chat Logs & Local Storage</h2>
+        <p>
+          Your conversation history, system prompt settings, and custom instructions are persisted locally for your convenience:
+        </p>
+        <ul class="list-disc list-inside space-y-1.5 pl-2 text-gray-400">
+          <li>Chat logs are saved to <code class="text-blue-300">%APPDATA%\gemini_client\history.json</code> on your personal drive.</li>
+          <li>Session settings are saved to <code class="text-blue-300">%APPDATA%\gemini_client\settings.json</code>.</li>
+          <li>No cloud syncing, remote backup, or external database is used.</li>
+        </ul>
+      </section>
+
+      <!-- Section 5 -->
+      <section class="space-y-3">
+        <h2 class="text-xl font-bold text-white tracking-tight">5. Third-Party Services (Google APIs)</h2>
+        <p>
+          When you prompt Gemini, Rusty Gemini initiates an encrypted HTTPS connection (TLS 1.3 / HTTP/2) directly between your PC and Google Generative Language APIs:
+        </p>
+        <ul class="list-disc list-inside space-y-1.5 pl-2 text-gray-400">
+          <li><code class="text-blue-300">generativelanguage.googleapis.com</code> (model catalog and streaming inference)</li>
+          <li><code class="text-blue-300">accounts.google.com</code> and <code class="text-blue-300">oauth2.googleapis.com</code> (authentication and token refresh)</li>
+        </ul>
+        <p>
+          Google's processing of your prompts and files is governed by Google's Privacy Policy (<a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:underline">policies.google.com/privacy</a>) and the terms applicable to your Google account or Google AI Pro tier.
+        </p>
+      </section>
+
+      <!-- Section 6 -->
+      <section class="space-y-3">
+        <h2 class="text-xl font-bold text-white tracking-tight">6. User Control & Data Deletion</h2>
+        <p>
+          You have full and unilateral control over all data stored by Rusty Gemini at all times:
+        </p>
+        <ul class="list-disc list-inside space-y-1.5 pl-2 text-gray-400">
+          <li><strong>Sign Out:</strong> Opening the in-app Settings drawer and clicking "Sign Out" instantly deletes your session tokens from Windows Credential Manager and disk.</li>
+          <li><strong>Clear History:</strong> Clicking "Clear current conversation" or deleting stored sessions wipes the corresponding local history.</li>
+          <li><strong>Complete Uninstallation:</strong> Deleting the <code class="text-blue-300">%APPDATA%\gemini_client</code> folder removes 100% of residual files, leaving zero traces on your computer.</li>
+        </ul>
+      </section>
+
+      <!-- Section 7 -->
+      <section class="space-y-3">
+        <h2 class="text-xl font-bold text-white tracking-tight">7. Security Practices</h2>
+        <p>
+          Rusty Gemini is developed in 100% memory-safe Rust with zero unsafe blocks in application logic. It enforces:
+        </p>
+        <ul class="list-disc list-inside space-y-1.5 pl-2 text-gray-400">
+          <li>Cryptographically random CSRF verification on loopback authentication handlers.</li>
+          <li>Direct TLS encryption for all outbound network traffic.</li>
+          <li>Standalone execution without embedded web browsers, browser plugins, or remote script injection vectors.</li>
+        </ul>
+      </section>
+
+      <!-- Section 8 -->
+      <section class="space-y-3">
+        <h2 class="text-xl font-bold text-white tracking-tight">8. Contact Information</h2>
+        <p>
+          If you have questions, feedback, or security disclosures regarding this Privacy Policy or Rusty Gemini, you may contact the maintainer through the project repository:
+        </p>
+        <div class="p-4 rounded-xl bg-surface border border-borderDark text-xs font-mono text-gray-300 space-y-1">
+          <div>Maintainer: Kahli (@0xKahli)</div>
+          <div>Project Repository: <a href="https://github.com/0xKahli/gemini-rust" class="text-blue-400 hover:underline">https://github.com/0xKahli/gemini-rust</a></div>
+          <div>Issue Tracker: <a href="https://github.com/0xKahli/gemini-rust/issues" class="text-blue-400 hover:underline">https://github.com/0xKahli/gemini-rust/issues</a></div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- ── Footer ───────────────────────────────────────────────────────────── -->
+  <footer class="border-t border-borderDark/60 bg-obsidian py-10 text-xs text-gray-500">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div class="flex items-center gap-2">
+        <img src="/assets/icon.png" class="w-5 h-5 rounded">
+        <span>Rusty Gemini ✦ Developed by Kahli (@0xKahli)</span>
+      </div>
+      <div class="flex items-center gap-6">
+        <a href="/" class="hover:text-gray-300 transition-colors">Home</a>
+        <a href="/terms" class="hover:text-gray-300 transition-colors">Terms of Service</a>
+        <a href="https://github.com/0xKahli/gemini-rust" class="hover:text-gray-300 transition-colors">GitHub</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
