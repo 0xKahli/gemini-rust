@@ -10,7 +10,7 @@ use crate::storage::{
 use base64::Engine;
 use crate::types::{guess_mime_type, AttachedFile, Message, Role};
 use egui::{Color32, RichText, Rounding, Stroke, Vec2};
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark::CommonMarkCache;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -240,6 +240,7 @@ pub struct GeminiApp {
     stored_conversations: Vec<StoredConversation>,
     confirm_delete_id: Option<String>,
     sparkle_texture: Option<egui::TextureHandle>,
+    latex_cache: crate::latex::LatexCache,
 
     // Runtime & async channels
     runtime: Arc<tokio::runtime::Runtime>,
@@ -324,6 +325,7 @@ impl GeminiApp {
             stored_conversations,
             confirm_delete_id: None,
             sparkle_texture: None,
+            latex_cache: crate::latex::LatexCache::new(),
             runtime,
             auth_rx: None,
         }
@@ -364,6 +366,48 @@ impl GeminiApp {
                 }
             }
         }
+    }
+
+    /// Attempts to read an image from the system clipboard and attach it.
+    /// Returns true if an image was found and successfully attached.
+    pub fn try_paste_image_from_clipboard(&mut self, ctx: &egui::Context) -> bool {
+        let mut clipboard = match arboard::Clipboard::new() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let img = match clipboard.get_image() {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+
+        let width = img.width as u32;
+        let height = img.height as u32;
+        if width == 0 || height == 0 {
+            return false;
+        }
+
+        let raw_bytes = img.bytes.into_owned();
+        if let Some(rgba) = image::RgbaImage::from_raw(width, height, raw_bytes) {
+            let mut png_buf = std::io::Cursor::new(Vec::new());
+            if rgba.write_to(&mut png_buf, image::ImageFormat::Png).is_ok() {
+                let png_bytes = png_buf.into_inner();
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+                let file_name = format!("clipboard_{}.png", chrono::Local::now().format("%H%M%S"));
+                let att = AttachedFile {
+                    file_name,
+                    mime_type: "image/png".to_string(),
+                    size_bytes: png_bytes.len(),
+                    data_base64: b64,
+                };
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.attached_files.push(att);
+                    ctx.request_repaint();
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn close_tab(&mut self, id: u64) {
@@ -822,15 +866,15 @@ impl GeminiApp {
             tab.chat_rx = Some(rx);
 
             let mut history_to_send = tab.history.clone();
-            if !self.system_prompt.is_empty() && history_to_send.len() == 1 {
-                history_to_send.insert(
-                    0,
-                    Message::user(format!("System instructions: {}\n\nAcknowledge briefly.", self.system_prompt)),
-                );
-                history_to_send.insert(
-                    1,
-                    Message::model("Understood."),
-                );
+            if history_to_send.len() == 1 {
+                let latex_instruction = "Always format mathematical equations, physics expressions, and formulas using standard LaTeX notation ($$...$$ for display blocks and $...$ for inline).";
+                let sys_content = if !self.system_prompt.is_empty() {
+                    format!("System instructions: {}\n{}\nAcknowledge briefly.", self.system_prompt, latex_instruction)
+                } else {
+                    format!("System instructions: {}\nAcknowledge briefly.", latex_instruction)
+                };
+                history_to_send.insert(0, Message::user(sys_content));
+                history_to_send.insert(1, Message::model("Understood. I will format all formulas in standard LaTeX notation ($$...$$ and $...$)."));
             }
 
             (tab.id, history_to_send, tx)
@@ -918,6 +962,15 @@ impl eframe::App for GeminiApp {
         // Ctrl+O: Attach Files
         if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::O)) {
             self.pick_and_attach_files();
+        }
+        // Ctrl+V: Paste Image from Clipboard
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V)) {
+            if self.try_paste_image_from_clipboard(ctx) {
+                ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
+                    i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
+                });
+            }
         }
 
         // Handle Drag & Drop Files onto window
@@ -2086,19 +2139,15 @@ impl GeminiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(19, 19, 20)))
             .show(ctx, |ui| {
+                let (is_empty, is_streaming, scroll_to_bottom) = if let Some(tab) = self.active_tab() {
+                    (tab.history.is_empty(), tab.is_streaming, if tab.history.is_empty() { false } else { tab.scroll_to_bottom })
+                } else {
+                    (true, false, false)
+                };
+
                 let mut copy_target: Option<(usize, String)> = None;
-
-                let (is_empty, is_streaming) = if let Some(tab) = self.active_tab() {
-                    (tab.history.is_empty(), tab.is_streaming)
-                } else {
-                    (true, false)
-                };
-
-                let scroll_to_bottom = if is_empty {
-                    false
-                } else {
-                    self.active_tab().map(|t| t.scroll_to_bottom).unwrap_or(false)
-                };
+                let mut export_pdf_target: Option<String> = None;
+                let latex_cache = &mut self.latex_cache;
 
                 let scroll = egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
@@ -2248,9 +2297,11 @@ impl GeminiApp {
                                                 });
                                                 ui.add_space(4.0);
 
-                                                // Markdown Content
-                                                CommonMarkViewer::new().show(
+                                                // Markdown Content with LaTeX Math
+                                                crate::latex::render_content_with_latex(
                                                     ui,
+                                                    ctx,
+                                                    latex_cache,
                                                     markdown_cache,
                                                     &msg.content,
                                                 );
@@ -2274,6 +2325,21 @@ impl GeminiApp {
                                                         .clicked()
                                                     {
                                                         copy_target = Some((idx, msg.content.clone()));
+                                                    }
+
+                                                    ui.add_space(6.0);
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                RichText::new("📄 PDF").size(11.0).color(Color32::from_gray(160)),
+                                                            )
+                                                            .fill(Color32::from_rgb(38, 40, 44))
+                                                            .rounding(Rounding::same(8.0)),
+                                                        )
+                                                        .on_hover_text("Save this answer as a PDF document")
+                                                        .clicked()
+                                                    {
+                                                        export_pdf_target = Some(msg.content.clone());
                                                     }
                                                 });
                                             });
@@ -2306,8 +2372,10 @@ impl GeminiApp {
                                             });
                                             ui.add_space(6.0);
                                             if !pending_response.is_empty() {
-                                                CommonMarkViewer::new().show(
+                                                crate::latex::render_content_with_latex(
                                                     ui,
+                                                    ctx,
+                                                    latex_cache,
                                                     markdown_cache,
                                                     pending_response,
                                                 );
@@ -2331,6 +2399,24 @@ impl GeminiApp {
                     ui.output_mut(|o| o.copied_text = text);
                     if let Some(tab) = self.active_tab_mut() {
                         tab.copied_idx = Some(idx);
+                    }
+                }
+
+                // Handle PDF Export Request
+                if let Some(content) = export_pdf_target {
+                    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                    let default_name = format!("Gemini_Answer_{}.pdf", timestamp);
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Save Gemini Answer as PDF")
+                        .add_filter("PDF Document (*.pdf)", &["pdf"])
+                        .set_file_name(&default_name)
+                        .save_file()
+                    {
+                        if let Err(e) = crate::pdf::PdfExporter::export_to_file(&content, &path) {
+                            eprintln!("Failed to export PDF: {}", e);
+                        } else {
+                            let _ = webbrowser::open(&path.to_string_lossy());
+                        }
                     }
                 }
             });

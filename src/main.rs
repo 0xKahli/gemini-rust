@@ -3,6 +3,8 @@
 mod app;
 mod auth;
 mod gemini;
+mod latex;
+mod pdf;
 mod storage;
 mod types;
 
