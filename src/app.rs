@@ -9,6 +9,54 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+fn setup_custom_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    #[cfg(windows)]
+    {
+        // 1. Segoe UI (Clean modern Windows typography)
+        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
+            fonts.font_data.insert(
+                "segoe_ui".to_owned(),
+                Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                prop.insert(0, "segoe_ui".to_owned());
+            }
+        }
+
+        // 2. Segoe UI Symbol (High-compatibility symbols, math, arrows, UI shapes)
+        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\seguisym.ttf") {
+            fonts.font_data.insert(
+                "segoe_symbol".to_owned(),
+                Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                prop.push("segoe_symbol".to_owned());
+            }
+            if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                mono.push("segoe_symbol".to_owned());
+            }
+        }
+
+        // 3. Segoe UI Emoji (Complete emoji coverage: 💬, ➕, ✨, 🚀, 🧠, 🤖, 🚪, etc.)
+        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\seguiemj.ttf") {
+            fonts.font_data.insert(
+                "segoe_emoji".to_owned(),
+                Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                prop.push("segoe_emoji".to_owned());
+            }
+            if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                mono.push("segoe_emoji".to_owned());
+            }
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 // ── Verified Live Working Models ─────────────────────────────────────────────
 
 fn default_models(is_pro: bool) -> Vec<ModelInfo> {
@@ -144,7 +192,9 @@ enum AuthTaskResult {
 }
 
 impl GeminiApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_custom_fonts(&cc.egui_ctx);
+
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -971,25 +1021,29 @@ impl GeminiApp {
                                             se: 0.0,
                                         })
                                         .stroke(stroke_color)
-                                        .inner_margin(egui::Margin::symmetric(12.0, 7.0));
+                                        .inner_margin(egui::Margin::symmetric(10.0, 6.0));
 
                                     let tab_resp = tab_frame.show(ui, |ui| {
-                                        ui.set_min_width(110.0);
-                                        ui.set_max_width(210.0);
+                                        ui.set_width(160.0);
                                         ui.horizontal(|ui| {
+                                            // Left: Tab Icon or Live Spinner
                                             if tab.is_streaming {
-                                                ui.spinner();
+                                                ui.add(egui::Spinner::new().size(13.0));
                                             } else {
                                                 ui.label(RichText::new("💬").size(12.0));
                                             }
-                                            ui.add_space(4.0);
+                                            ui.add_space(2.0);
 
+                                            // Center: Tab Title Label (takes remaining space minus close button)
                                             let title_str = if tab.title.trim().is_empty() {
                                                 "New chat"
                                             } else {
                                                 &tab.title
                                             };
-                                            let label = ui.add(
+                                            let title_w = (ui.available_width() - 24.0).max(40.0);
+
+                                            let title_resp = ui.add_sized(
+                                                egui::vec2(title_w, 20.0),
                                                 egui::Label::new(
                                                     RichText::new(title_str)
                                                         .size(12.5)
@@ -999,47 +1053,81 @@ impl GeminiApp {
                                                 .truncate()
                                                 .sense(egui::Sense::click()),
                                             );
-                                            if label.clicked() {
+
+                                            if title_resp.clicked() {
                                                 switch_to_tab = Some(tab.id);
                                             }
 
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                let close_btn = ui.add(
-                                                    egui::Button::new(
-                                                        RichText::new("✕")
-                                                            .size(11.0)
-                                                            .color(if is_active {
-                                                                Color32::from_gray(200)
-                                                            } else {
-                                                                Color32::from_gray(140)
-                                                            }),
-                                                    )
-                                                    .fill(Color32::TRANSPARENT)
-                                                    .frame(false),
-                                                ).on_hover_text("Close tab (Ctrl+W)");
+                                            // Right: Dedicated Tab Closing Icon Button (18x18 circle)
+                                            let (close_rect, close_resp) = ui.allocate_exact_size(
+                                                egui::vec2(18.0, 18.0),
+                                                egui::Sense::click(),
+                                            );
 
-                                                if close_btn.clicked() {
-                                                    close_tab_id = Some(tab.id);
-                                                }
-                                            });
+                                            let is_close_hovered = close_resp.hovered();
+                                            let close_bg = if is_close_hovered {
+                                                Color32::from_rgb(62, 65, 74)
+                                            } else {
+                                                Color32::TRANSPARENT
+                                            };
+
+                                            ui.painter().rect_filled(close_rect, Rounding::same(9.0), close_bg);
+
+                                            let close_color = if is_close_hovered {
+                                                Color32::WHITE
+                                            } else if is_active {
+                                                Color32::from_gray(195)
+                                            } else {
+                                                Color32::from_gray(135)
+                                            };
+
+                                            ui.painter().text(
+                                                close_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "✕",
+                                                egui::FontId::proportional(11.0),
+                                                close_color,
+                                            );
+
+                                            if close_resp.clicked() {
+                                                close_tab_id = Some(tab.id);
+                                            }
+                                            close_resp.on_hover_text("Close tab (Ctrl+W)");
                                         });
                                     });
 
-                                    if tab_resp.response.interact(egui::Sense::click()).clicked() {
+                                    // Switch tab if clicked on tab background and close was not clicked
+                                    if tab_resp.response.interact(egui::Sense::click()).clicked() && close_tab_id.is_none() {
                                         switch_to_tab = Some(tab.id);
                                     }
                                 }
 
-                                // ➕ Add new tab button
-                                let add_btn = ui.add(
-                                    egui::Button::new(RichText::new("➕").size(12.0).color(Color32::from_gray(210)))
-                                        .fill(Color32::from_rgb(33, 35, 39))
-                                        .rounding(Rounding::same(6.0)),
-                                ).on_hover_text("New tab (Ctrl+T)");
+                                // ➕ Add new tab button (Chrome-style circular button)
+                                let (add_rect, add_resp) = ui.allocate_exact_size(
+                                    egui::vec2(26.0, 26.0),
+                                    egui::Sense::click(),
+                                );
 
-                                if add_btn.clicked() {
+                                let is_add_hovered = add_resp.hovered();
+                                let add_bg = if is_add_hovered {
+                                    Color32::from_rgb(46, 49, 56)
+                                } else {
+                                    Color32::from_rgb(30, 32, 36)
+                                };
+
+                                ui.painter().rect_filled(add_rect, Rounding::same(13.0), add_bg);
+                                ui.painter().text(
+                                    add_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "+",
+                                    egui::FontId::proportional(15.0),
+                                    if is_add_hovered { Color32::WHITE } else { Color32::from_gray(210) },
+                                );
+
+                                if add_resp.clicked() {
                                     self.add_new_tab();
                                 }
+                                add_resp.on_hover_text("New tab (Ctrl+T)");
                             });
                         });
                 });
