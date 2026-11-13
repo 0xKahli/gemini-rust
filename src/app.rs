@@ -2098,38 +2098,68 @@ impl GeminiApp {
                             let is_copied = *copied_idx == Some(idx);
 
                             if is_user {
-                                // User Message Bubble (Right-aligned)
+                                // User Message Bubble (Right-aligned, hugs content width)
+                                let max_text_w = (ui.available_width() * 0.70 - 32.0).max(80.0);
+                                let font_id = egui::FontId::proportional(14.0);
+
+                                let text_w = if !msg.content.trim().is_empty() {
+                                    let galley = ui.painter().layout(
+                                        msg.content.clone(),
+                                        font_id.clone(),
+                                        Color32::WHITE,
+                                        max_text_w,
+                                    );
+                                    galley.size().x
+                                } else {
+                                    0.0_f32
+                                };
+
+                                let files_w = if !msg.files.is_empty() {
+                                    let chip_font = egui::FontId::proportional(12.0);
+                                    let mut max_chip = 0.0_f32;
+                                    for file in &msg.files {
+                                        let label = format!("{} {}", file.file_name, file.formatted_size());
+                                        let g = ui.painter().layout_no_wrap(label, chip_font.clone(), Color32::WHITE);
+                                        let w = g.size().x + 36.0;
+                                        max_chip = max_chip.max(w);
+                                    }
+                                    max_chip
+                                } else {
+                                    0.0_f32
+                                };
+
+                                let inner_w = text_w.max(files_w).min(max_text_w).max(24.0);
+
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                                     egui::Frame::none()
                                         .fill(Color32::from_rgb(43, 52, 69))
                                         .rounding(Rounding::same(16.0))
-                                        .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+                                        .inner_margin(egui::Margin::symmetric(16.0, 10.0))
                                         .show(ui, |ui| {
-                                            ui.set_max_width(ui.available_width() * 0.72);
-                                            ui.vertical(|ui| {
+                                            ui.set_width(inner_w);
+                                            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                                                 // Display attached files cards if any
                                                 if !msg.files.is_empty() {
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                                        for file in &msg.files {
-                                                            egui::Frame::none()
-                                                                .fill(Color32::from_rgb(31, 39, 56))
-                                                                .rounding(Rounding::same(8.0))
-                                                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 110, 180)))
-                                                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                                                                .show(ui, |ui| {
-                                                                    ui.horizontal(|ui| {
-                                                                        ui.label(RichText::new(file.icon()).size(13.0));
-                                                                        ui.label(RichText::new(&file.file_name).size(12.0).color(Color32::WHITE).strong());
-                                                                        ui.label(RichText::new(file.formatted_size()).size(10.0).color(Color32::from_gray(180)));
-                                                                    });
+                                                    for file in &msg.files {
+                                                        egui::Frame::none()
+                                                            .fill(Color32::from_rgb(31, 39, 56))
+                                                            .rounding(Rounding::same(8.0))
+                                                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 110, 180)))
+                                                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                                            .show(ui, |ui| {
+                                                                ui.horizontal(|ui| {
+                                                                    ui.label(RichText::new(file.icon()).size(13.0));
+                                                                    ui.label(RichText::new(&file.file_name).size(12.0).color(Color32::WHITE).strong());
+                                                                    ui.label(RichText::new(file.formatted_size()).size(10.0).color(Color32::from_gray(180)));
                                                                 });
-                                                        }
-                                                    });
+                                                            });
+                                                        ui.add_space(4.0);
+                                                    }
                                                     if !msg.content.trim().is_empty() {
-                                                        ui.add_space(6.0);
+                                                        ui.add_space(2.0);
                                                     }
                                                 }
+
                                                 if !msg.content.trim().is_empty() {
                                                     ui.label(RichText::new(&msg.content).size(14.0).color(Color32::WHITE));
                                                 }
