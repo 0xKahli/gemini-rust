@@ -11,17 +11,71 @@ use reqwest::Client;
 // or falling back to a bundled default for personal builds.
 // Never commit real credentials — set env vars or use a local .env loader.
 fn client_id() -> String {
-    std::env::var("GEMINI_CLIENT_ID").unwrap_or_else(|_| {
-        // Replace with your own OAuth client ID for personal builds
-        String::new()
-    })
+    if let Ok(val) = std::env::var("GEMINI_CLIENT_ID") {
+        if !val.trim().is_empty() {
+            return val;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(env) = hkcu.open_subkey("Environment") {
+            if let Ok(val) = env.get_value::<String, _>("GEMINI_CLIENT_ID") {
+                if !val.trim().is_empty() {
+                    return val;
+                }
+            }
+        }
+    }
+    String::new()
 }
 
 fn client_secret() -> String {
-    std::env::var("GEMINI_CLIENT_SECRET").unwrap_or_else(|_| {
-        // Replace with your own OAuth client secret for personal builds
-        String::new()
-    })
+    if let Ok(val) = std::env::var("GEMINI_CLIENT_SECRET") {
+        if !val.trim().is_empty() {
+            return val;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(env) = hkcu.open_subkey("Environment") {
+            if let Ok(val) = env.get_value::<String, _>("GEMINI_CLIENT_SECRET") {
+                if !val.trim().is_empty() {
+                    return val;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+pub fn get_gemini_api_key() -> Option<String> {
+    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(env) = hkcu.open_subkey("Environment") {
+            if let Ok(val) = env.get_value::<String, _>("GEMINI_API_KEY") {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 const KEYRING_SERVICE: &str = "gemini-rust-client";
 const KEYRING_USER: &str = "oauth-tokens";
@@ -267,7 +321,7 @@ pub async fn fetch_available_models(access_token: &str) -> Result<Vec<ModelInfo>
     };
 
     if need_fallback {
-        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        if let Some(key) = get_gemini_api_key() {
             if let Ok(api_resp) = client
                 .get(format!("https://generativelanguage.googleapis.com/v1beta/models?key={}", key))
                 .send()
@@ -293,12 +347,47 @@ pub async fn fetch_available_models(access_token: &str) -> Result<Vec<ModelInfo>
         .await
         .map_err(|e| format!("JSON parse error: {}", e))?;
 
-    let models = parsed
+    let mut models: Vec<ModelInfo> = parsed
         .models
         .unwrap_or_default()
         .into_iter()
-        .filter(|m| m.supports_generation())
+        .filter(|m| {
+            if !m.supports_generation() {
+                return false;
+            }
+            let name_lower = m.name.to_lowercase();
+            !name_lower.contains("tts")
+                && !name_lower.contains("robotics")
+                && !name_lower.contains("lyria")
+                && !name_lower.contains("computer-use")
+        })
         .collect();
+
+    // Prioritize flagship Gemini chat models to match the official Gemini experience
+    models.sort_by_key(|m| {
+        let n = m.name.to_lowercase();
+        if n.contains("gemini-2.5-flash") && !n.contains("lite") {
+            0
+        } else if n.contains("gemini-2.5-pro") {
+            1
+        } else if n.contains("gemini-3.8-flash") {
+            2
+        } else if n.contains("gemini-3.1-pro") {
+            3
+        } else if n.contains("gemini-3.7-flash") {
+            4
+        } else if n.contains("gemini-3.5-flash") {
+            5
+        } else if n.contains("gemini-flash-latest") {
+            6
+        } else if n.contains("gemini-pro-latest") {
+            7
+        } else if n.contains("gemini-2.5-flash-lite") {
+            8
+        } else {
+            50
+        }
+    });
 
     Ok(models)
 }

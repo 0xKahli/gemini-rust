@@ -1,6 +1,6 @@
 use crate::auth::{
-    clear_tokens, fetch_available_models, load_tokens, refresh_access_token, start_login_flow,
-    ModelInfo, TokenStore,
+    clear_tokens, fetch_available_models, get_gemini_api_key, load_tokens, refresh_access_token,
+    start_login_flow, ModelInfo, TokenStore,
 };
 use crate::gemini::{stream_message, AuthMethod};
 use crate::types::{Message, Role};
@@ -16,31 +16,43 @@ fn default_models() -> Vec<ModelInfo> {
         ModelInfo {
             name: "models/gemini-2.5-flash".to_string(),
             display_name: "Gemini 2.5 Flash".to_string(),
-            description: "Fast, versatile multimodal intelligence".to_string(),
+            description: "Default fast model for everyday chats, quick answers, and search".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
         ModelInfo {
             name: "models/gemini-2.5-pro".to_string(),
             display_name: "Gemini 2.5 Pro".to_string(),
-            description: "Advanced reasoning and complex coding".to_string(),
+            description: "Deep thinking model for complex math, analysis, and coding".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
         ModelInfo {
-            name: "models/gemini-2.0-flash".to_string(),
-            display_name: "Gemini 2.0 Flash".to_string(),
-            description: "High speed, multimodal generation".to_string(),
+            name: "models/gemini-3.8-flash".to_string(),
+            display_name: "Gemini 3.8 Flash".to_string(),
+            description: "Latest 3.8 generation high-speed multimodal intelligence".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
         ModelInfo {
-            name: "models/gemini-1.5-flash".to_string(),
-            display_name: "Gemini 1.5 Flash".to_string(),
-            description: "Fast and lightweight".to_string(),
+            name: "models/gemini-3.1-pro-preview".to_string(),
+            display_name: "Gemini 3.1 Pro Preview".to_string(),
+            description: "Next-generation reasoning and expert problem solving".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
         ModelInfo {
-            name: "models/gemini-1.5-pro".to_string(),
-            display_name: "Gemini 1.5 Pro".to_string(),
-            description: "Large context reasoning".to_string(),
+            name: "models/gemini-flash-latest".to_string(),
+            display_name: "Gemini Flash (Latest)".to_string(),
+            description: "Always points to the newest Flash release on the Gemini website".to_string(),
+            supported_generation_methods: vec!["generateContent".to_string()],
+        },
+        ModelInfo {
+            name: "models/gemini-pro-latest".to_string(),
+            display_name: "Gemini Pro (Latest)".to_string(),
+            description: "Always points to the newest Pro release on the Gemini website".to_string(),
+            supported_generation_methods: vec!["generateContent".to_string()],
+        },
+        ModelInfo {
+            name: "models/gemini-2.5-flash-lite".to_string(),
+            display_name: "Gemini 2.5 Flash-Lite".to_string(),
+            description: "Lightweight, super-fast model for simple questions".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
     ]
@@ -264,11 +276,15 @@ impl GeminiApp {
             return;
         }
 
-        let auth = match &self.auth_state {
-            AuthState::LoggedIn { tokens, .. } => {
-                AuthMethod::Bearer(tokens.access_token.clone())
+        let auth = if let Some(key) = get_gemini_api_key() {
+            AuthMethod::ApiKey(key)
+        } else {
+            match &self.auth_state {
+                AuthState::LoggedIn { tokens, .. } => {
+                    AuthMethod::Bearer(tokens.access_token.clone())
+                }
+                _ => return,
             }
-            _ => return,
         };
 
         let model = match &self.auth_state {

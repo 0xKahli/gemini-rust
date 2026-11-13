@@ -71,7 +71,7 @@ pub async fn stream_message(
 
     // If OAuth token is rejected due to scope permissions, automatically fallback to GEMINI_API_KEY
     if response.status().as_u16() == 403 {
-        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        if let Some(key) = crate::auth::get_gemini_api_key() {
             let fallback_url = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
                 model, key
