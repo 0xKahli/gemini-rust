@@ -322,7 +322,10 @@ pub fn latex_math_to_unicode(latex: &str) -> String {
         .replace(r"\quad", "  ")
         .replace(r"\qquad", "   ")
         .replace(r"\!", "")
-        .replace(r"\:", " ");
+        .replace(r"\:", " ")
+        .replace(r"\ ", " ")
+        .replace(r"\space", " ")
+        .replace("~", " ");
 
     // Fractions: \frac{A}{B}
     while let Some(frac_idx) = s.find(r"\frac") {
@@ -357,7 +360,7 @@ pub fn latex_math_to_unicode(latex: &str) -> String {
     }
 
     // Text & formatting macros
-    for m in &[r"\text", r"\mathrm", r"\mathbf", r"\mathit", r"\boldsymbol", r"\textbf"] {
+    for m in &[r"\text", r"\mathrm", r"\mathbf", r"\mathit", r"\boldsymbol", r"\textbf", r"\operatorname"] {
         while let Some(idx) = s.find(m) {
             let plen = m.len();
             if let Some((arg, end_idx)) = parse_single_brace(&s[idx + plen..]) {
@@ -440,7 +443,10 @@ pub fn latex_math_to_unicode(latex: &str) -> String {
         .replace(r"\mp", "∓")
         .replace(r"\times", "×")
         .replace(r"\cdot", "·")
-        .replace(r"\circ", "∘")
+        .replace(r"\circ", " ∘ ")
+        .replace(r"\comp", " ∘ ")
+        .replace(r"\bullet", " • ")
+        .replace(r"\star", " ⋆ ")
         .replace(r"\div", "÷")
         .replace(r"\ast", "∗")
         .replace(r"\cup", "∪")
@@ -554,8 +560,8 @@ pub fn preprocess_inline_math(text: &str) -> String {
                 let clean_expr = expr.trim();
                 if !clean_expr.is_empty() {
                     let formatted = latex_math_to_unicode(clean_expr);
-                    // If it's a single variable like "f" or "g", italicize it in markdown
-                    if formatted.len() == 1 && formatted.chars().all(|c| c.is_alphabetic()) {
+                    // If it's a single variable like "f", "g", "x", or Greek "α", italicize it in markdown
+                    if formatted.chars().count() == 1 && formatted.chars().all(|c| c.is_alphabetic()) {
                         result.push('*');
                         result.push_str(&formatted);
                         result.push('*');
@@ -588,7 +594,7 @@ pub fn preprocess_inline_math(text: &str) -> String {
                 let clean_expr = expr.trim();
                 if !clean_expr.is_empty() {
                     let formatted = latex_math_to_unicode(clean_expr);
-                    if formatted.len() == 1 && formatted.chars().all(|c| c.is_alphabetic()) {
+                    if formatted.chars().count() == 1 && formatted.chars().all(|c| c.is_alphabetic()) {
                         result.push('*');
                         result.push_str(&formatted);
                         result.push('*');
@@ -766,6 +772,16 @@ mod tests {
 
         let single_var = "Injectivité de $f$ et de $g$";
         assert_eq!(preprocess_inline_math(single_var), "Injectivité de *f* et de *g*");
+
+        let comp = "Ce n'est pas parce que $g \\circ f$ est injective que $g$ est injective (puisque $g \\circ f = \\mathrm{id}$ est injective, mais $g$ ne l'est pas).";
+        let comp_out = preprocess_inline_math(comp);
+        assert!(comp_out.contains("g ∘ f est injective que *g* est injective"));
+        assert!(comp_out.contains("g ∘ f = id"));
+        assert!(comp_out.contains("mais *g* ne l'est pas"));
+
+        let space_test = "composition $g \\ f$ n'implique";
+        let space_out = preprocess_inline_math(space_test);
+        assert_eq!(space_out, "composition g f n'implique");
     }
 
     #[test]
