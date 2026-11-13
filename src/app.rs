@@ -7,7 +7,8 @@ use crate::storage::{
     load_conversations, load_session, save_session, SavedSessionState, SavedTabState,
     StoredConversation,
 };
-use crate::types::{Message, Role};
+use base64::Engine;
+use crate::types::{guess_mime_type, AttachedFile, Message, Role};
 use egui::{Color32, RichText, Rounding, Stroke, Vec2};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::sync::Arc;
@@ -124,6 +125,29 @@ fn default_models(is_pro: bool) -> Vec<ModelInfo> {
     list
 }
 
+pub fn load_attachment_from_path(path: &std::path::Path) -> Result<AttachedFile, String> {
+    let file_name = path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attachment".to_string());
+
+    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
+    let size_bytes = bytes.len();
+    if size_bytes > 20 * 1024 * 1024 {
+        return Err("File exceeds 20MB limit for Gemini upload".to_string());
+    }
+
+    let mime_type = guess_mime_type(&file_name).to_string();
+    let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    Ok(AttachedFile {
+        file_name,
+        mime_type,
+        size_bytes,
+        data_base64,
+    })
+}
+
 // ── Multi-Tab Conversation Struct ───────────────────────────────────────────
 
 pub struct ConversationTab {
@@ -132,6 +156,7 @@ pub struct ConversationTab {
     pub title: String,
     pub history: Vec<Message>,
     pub input: String,
+    pub attached_files: Vec<AttachedFile>,
     pub is_streaming: bool,
     pub pending_response: String,
     pub copied_idx: Option<usize>,
@@ -153,6 +178,7 @@ impl ConversationTab {
             title: "New chat".to_string(),
             history: Vec::new(),
             input: String::new(),
+            attached_files: Vec::new(),
             is_streaming: false,
             pending_response: String::new(),
             copied_idx: None,
@@ -169,6 +195,7 @@ impl ConversationTab {
             title,
             history,
             input: String::new(),
+            attached_files: Vec::new(),
             is_streaming: false,
             pending_response: String::new(),
             copied_idx: None,
@@ -311,6 +338,32 @@ impl GeminiApp {
         self.active_tab_id = id;
         self.persist_session();
         id
+    }
+
+    pub fn pick_and_attach_files(&mut self) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .set_title("Select files to upload to Gemini")
+            .add_filter(
+                "All Supported Files",
+                &[
+                    "png", "jpg", "jpeg", "webp", "gif", "bmp", "pdf", "mp3", "wav", "m4a",
+                    "txt", "md", "rs", "py", "js", "ts", "json", "csv", "html", "css",
+                ],
+            )
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "bmp"])
+            .add_filter("Documents & PDFs", &["pdf", "txt", "md", "json", "csv"])
+            .add_filter("Audio", &["mp3", "wav", "ogg", "m4a"])
+            .add_filter("All Files (*.*)", &["*"])
+            .pick_files()
+        {
+            for path in paths {
+                if let Ok(att) = load_attachment_from_path(&path) {
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.attached_files.push(att);
+                    }
+                }
+            }
+        }
     }
 
     pub fn close_tab(&mut self, id: u64) {
@@ -734,23 +787,32 @@ impl GeminiApp {
             };
 
             let input = tab.input.trim().to_string();
-            if input.is_empty() || tab.is_streaming {
+            let has_files = !tab.attached_files.is_empty();
+            if (input.is_empty() && !has_files) || tab.is_streaming {
                 return;
             }
 
+            let attached_files = std::mem::take(&mut tab.attached_files);
+
             // Auto-update tab title if this is the first message or "New chat"
             if tab.title == "New chat" || tab.title.is_empty() {
-                let first_line = input.lines().next().unwrap_or("Chat").trim();
-                let chars: Vec<char> = first_line.chars().collect();
+                let title_source = if !input.is_empty() {
+                    input.lines().next().unwrap_or("Chat").trim()
+                } else if let Some(f) = attached_files.first() {
+                    &f.file_name
+                } else {
+                    "Chat"
+                };
+                let chars: Vec<char> = title_source.chars().collect();
                 tab.title = if chars.len() > 20 {
                     let s: String = chars[..18].iter().collect();
                     format!("{}…", s)
                 } else {
-                    first_line.to_string()
+                    title_source.to_string()
                 };
             }
 
-            tab.history.push(Message::user(&input));
+            tab.history.push(Message::user_with_files(&input, attached_files));
             tab.input.clear();
             tab.is_streaming = true;
             tab.pending_response.clear();
@@ -763,17 +825,11 @@ impl GeminiApp {
             if !self.system_prompt.is_empty() && history_to_send.len() == 1 {
                 history_to_send.insert(
                     0,
-                    Message {
-                        role: Role::User,
-                        content: format!("System instructions: {}\n\nAcknowledge briefly.", self.system_prompt),
-                    },
+                    Message::user(format!("System instructions: {}\n\nAcknowledge briefly.", self.system_prompt)),
                 );
                 history_to_send.insert(
                     1,
-                    Message {
-                        role: Role::Model,
-                        content: "Understood.".to_string(),
-                    },
+                    Message::model("Understood."),
                 );
             }
 
@@ -858,6 +914,39 @@ impl eframe::App for GeminiApp {
         // Ctrl+H: Toggle History Sidebar
         if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::H)) {
             self.show_history_sidebar = !self.show_history_sidebar;
+        }
+        // Ctrl+O: Attach Files
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::O)) {
+            self.pick_and_attach_files();
+        }
+
+        // Handle Drag & Drop Files onto window
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped_files.is_empty() {
+            for file in dropped_files {
+                if let Some(path) = file.path {
+                    if let Ok(att) = load_attachment_from_path(&path) {
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.attached_files.push(att);
+                        }
+                    }
+                } else if let Some(bytes) = file.bytes {
+                    if bytes.len() <= 20 * 1024 * 1024 {
+                        let name = file.name;
+                        let mime = guess_mime_type(&name);
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let att = AttachedFile {
+                            file_name: name,
+                            mime_type: mime.to_string(),
+                            size_bytes: bytes.len(),
+                            data_base64: b64,
+                        };
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.attached_files.push(att);
+                        }
+                    }
+                }
+            }
         }
 
         // Repaint if any tab is streaming or auth in progress
@@ -1782,60 +1871,115 @@ impl GeminiApp {
                     .inner_margin(egui::Margin::symmetric(24.0, 10.0)),
             )
             .show(ctx, |ui| {
-                // Floating input pill container (compact bottom capsule)
+                // Floating input pill container (compact bottom capsule with file attachments)
                 egui::Frame::none()
                     .fill(Color32::from_rgb(30, 31, 35))
                     .rounding(Rounding::same(24.0))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 55, 62)))
-                    .inner_margin(egui::Margin::symmetric(18.0, 8.0))
+                    .inner_margin(egui::Margin::symmetric(14.0, 8.0))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let available_w = (ui.available_width() - 44.0).max(100.0);
+                        ui.vertical(|ui| {
+                            // Render attached files chips if any
+                            let mut remove_file_idx = None;
+                            if let Some(tab) = self.active_tab() {
+                                if !tab.attached_files.is_empty() {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                                        for (f_idx, file) in tab.attached_files.iter().enumerate() {
+                                            egui::Frame::none()
+                                                .fill(Color32::from_rgb(42, 45, 54))
+                                                .rounding(Rounding::same(8.0))
+                                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 133, 244)))
+                                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                                .show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new(file.icon()).size(13.0));
+                                                        let name_display = if file.file_name.chars().count() > 22 {
+                                                            let s: String = file.file_name.chars().take(20).collect();
+                                                            format!("{}…", s)
+                                                        } else {
+                                                            file.file_name.clone()
+                                                        };
+                                                        ui.label(RichText::new(name_display).size(12.0).color(Color32::WHITE).strong());
+                                                        ui.label(RichText::new(file.formatted_size()).size(10.5).color(Color32::from_gray(160)));
+                                                        if ui.add(
+                                                            egui::Button::new(RichText::new("✕").size(10.5).color(Color32::from_gray(180)))
+                                                                .fill(Color32::TRANSPARENT),
+                                                        ).clicked() {
+                                                            remove_file_idx = Some(f_idx);
+                                                        }
+                                                    });
+                                                });
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                            }
+                            if let Some(f_idx) = remove_file_idx {
+                                if let Some(tab) = self.active_tab_mut() {
+                                    tab.attached_files.remove(f_idx);
+                                }
+                            }
 
-                            let (has_text, is_streaming) = if let Some(tab) = self.active_tab_mut() {
-                                let input_edit = egui::TextEdit::multiline(&mut tab.input)
-                                    .hint_text("Chat with Gemini…")
-                                    .frame(false)
-                                    .desired_rows(1)
-                                    .desired_width(available_w);
-
-                                let response = ui.add(input_edit);
-
-                                if response.has_focus()
-                                    && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                                {
-                                    if tab.input.trim().is_empty() {
-                                        tab.input.clear();
-                                    } else {
-                                        should_send = true;
-                                    }
+                            ui.horizontal(|ui| {
+                                // 📎 Attach Button (Opens native Windows file dialog)
+                                let clip_btn = ui.add_sized(
+                                    Vec2::new(30.0, 32.0),
+                                    egui::Button::new(RichText::new("📎").size(16.0).color(Color32::from_gray(180)))
+                                        .fill(Color32::TRANSPARENT)
+                                        .rounding(Rounding::same(15.0)),
+                                ).on_hover_text("Upload files, images, or documents (Ctrl+O or Drag & Drop)");
+                                if clip_btn.clicked() {
+                                    self.pick_and_attach_files();
                                 }
 
-                                (!tab.input.trim().is_empty(), tab.is_streaming)
-                            } else {
-                                (false, false)
-                            };
+                                let available_w = (ui.available_width() - 44.0).max(100.0);
 
-                            // Send button
-                            let (btn_fill, btn_color) = if is_streaming {
-                                (Color32::from_rgb(45, 47, 52), Color32::from_gray(180))
-                            } else if has_text {
-                                (Color32::from_rgb(26, 115, 232), Color32::WHITE)
-                            } else {
-                                (Color32::from_rgb(38, 40, 45), Color32::from_gray(130))
-                            };
+                                let (can_send, is_streaming) = if let Some(tab) = self.active_tab_mut() {
+                                    let input_edit = egui::TextEdit::multiline(&mut tab.input)
+                                        .hint_text("Chat with Gemini…")
+                                        .frame(false)
+                                        .desired_rows(1)
+                                        .desired_width(available_w);
 
-                            let btn_icon = if is_streaming { "⏳" } else { "➤" };
-                            let send_btn = ui.add_sized(
-                                Vec2::new(34.0, 34.0),
-                                egui::Button::new(RichText::new(btn_icon).size(15.0).color(btn_color))
-                                    .fill(btn_fill)
-                                    .rounding(Rounding::same(17.0)),
-                            ).on_hover_text("Send message (Enter)");
+                                    let response = ui.add(input_edit);
 
-                            if send_btn.clicked() {
-                                should_send = true;
-                            }
+                                    if response.has_focus()
+                                        && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                                    {
+                                        if tab.input.trim().is_empty() && tab.attached_files.is_empty() {
+                                            tab.input.clear();
+                                        } else {
+                                            should_send = true;
+                                        }
+                                    }
+
+                                    (!tab.input.trim().is_empty() || !tab.attached_files.is_empty(), tab.is_streaming)
+                                } else {
+                                    (false, false)
+                                };
+
+                                // Send button
+                                let (btn_fill, btn_color) = if is_streaming {
+                                    (Color32::from_rgb(45, 47, 52), Color32::from_gray(180))
+                                } else if can_send {
+                                    (Color32::from_rgb(26, 115, 232), Color32::WHITE)
+                                } else {
+                                    (Color32::from_rgb(38, 40, 45), Color32::from_gray(130))
+                                };
+
+                                let btn_icon = if is_streaming { "⏳" } else { "➤" };
+                                let send_btn = ui.add_sized(
+                                    Vec2::new(34.0, 34.0),
+                                    egui::Button::new(RichText::new(btn_icon).size(15.0).color(btn_color))
+                                        .fill(btn_fill)
+                                        .rounding(Rounding::same(17.0)),
+                                ).on_hover_text("Send message (Enter)");
+
+                                if send_btn.clicked() {
+                                    should_send = true;
+                                }
+                            });
                         });
                     });
 
@@ -1939,7 +2083,34 @@ impl GeminiApp {
                                         .inner_margin(egui::Margin::symmetric(16.0, 12.0))
                                         .show(ui, |ui| {
                                             ui.set_max_width(ui.available_width() * 0.72);
-                                            ui.label(RichText::new(&msg.content).size(14.0).color(Color32::WHITE));
+                                            ui.vertical(|ui| {
+                                                // Display attached files cards if any
+                                                if !msg.files.is_empty() {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                                                        for file in &msg.files {
+                                                            egui::Frame::none()
+                                                                .fill(Color32::from_rgb(31, 39, 56))
+                                                                .rounding(Rounding::same(8.0))
+                                                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 110, 180)))
+                                                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                                                .show(ui, |ui| {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label(RichText::new(file.icon()).size(13.0));
+                                                                        ui.label(RichText::new(&file.file_name).size(12.0).color(Color32::WHITE).strong());
+                                                                        ui.label(RichText::new(file.formatted_size()).size(10.0).color(Color32::from_gray(180)));
+                                                                    });
+                                                                });
+                                                        }
+                                                    });
+                                                    if !msg.content.trim().is_empty() {
+                                                        ui.add_space(6.0);
+                                                    }
+                                                }
+                                                if !msg.content.trim().is_empty() {
+                                                    ui.label(RichText::new(&msg.content).size(14.0).color(Color32::WHITE));
+                                                }
+                                            });
                                         });
                                 });
                             } else {

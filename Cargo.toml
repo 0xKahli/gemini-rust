@@ -24,6 +24,8 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 winreg = "0.50"
 image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+rfd = "0.15"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

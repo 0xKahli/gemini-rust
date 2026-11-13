@@ -35,9 +35,21 @@ pub async fn stream_message(
                 Role::User => "user",
                 Role::Model => "model",
             };
+            let mut parts = Vec::new();
+            for file in &msg.files {
+                parts.push(json!({
+                    "inlineData": {
+                        "mimeType": file.mime_type,
+                        "data": file.data_base64
+                    }
+                }));
+            }
+            if !msg.content.trim().is_empty() || parts.is_empty() {
+                parts.push(json!({ "text": msg.content }));
+            }
             json!({
                 "role": role,
-                "parts": [{ "text": msg.content }]
+                "parts": parts
             })
         })
         .collect();

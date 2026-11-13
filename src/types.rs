@@ -17,17 +17,113 @@ impl Role {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachedFile {
+    pub file_name: String,
+    pub mime_type: String,
+    pub size_bytes: usize,
+    pub data_base64: String,
+}
+
+impl AttachedFile {
+    pub fn formatted_size(&self) -> String {
+        if self.size_bytes < 1024 {
+            format!("{} B", self.size_bytes)
+        } else if self.size_bytes < 1024 * 1024 {
+            format!("{:.1} KB", self.size_bytes as f32 / 1024.0)
+        } else {
+            format!("{:.1} MB", self.size_bytes as f32 / (1024.0 * 1024.0))
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        if self.mime_type.starts_with("image/") {
+            "🖼"
+        } else if self.mime_type == "application/pdf" {
+            "📄"
+        } else if self.mime_type.starts_with("audio/") {
+            "🎵"
+        } else if self.mime_type.starts_with("video/") {
+            "🎬"
+        } else if self.mime_type.starts_with("text/") || self.mime_type.contains("json") {
+            "📝"
+        } else {
+            "📎"
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_image(&self) -> bool {
+        self.mime_type.starts_with("image/")
+    }
+}
+
+pub fn guess_mime_type(file_name: &str) -> &'static str {
+    let lower = file_name.to_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "mp3" => "audio/mp3",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "m4a" => "audio/m4a",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "rs" => "text/x-rust",
+        "py" => "text/x-python",
+        "js" => "text/javascript",
+        "ts" => "text/typescript",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "xml" => "text/xml",
+        "c" | "cpp" | "h" | "hpp" => "text/x-c",
+        "java" => "text/x-java",
+        "go" => "text/x-go",
+        "sh" | "bash" | "bat" | "ps1" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<AttachedFile>,
 }
 
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
+        Self {
+            role: Role::User,
+            content: content.into(),
+            files: Vec::new(),
+        }
+    }
+
+    pub fn user_with_files(content: impl Into<String>, files: Vec<AttachedFile>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            files,
+        }
     }
 
     pub fn model(content: impl Into<String>) -> Self {
-        Self { role: Role::Model, content: content.into() }
+        Self {
+            role: Role::Model,
+            content: content.into(),
+            files: Vec::new(),
+        }
     }
 }
