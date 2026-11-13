@@ -5,7 +5,7 @@ use oauth2::{
     TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;use reqwest::Client;
+use reqwest::Client;
 
 // Loaded at runtime from GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET env vars,
 // or falling back to a bundled default for personal builds.
@@ -104,7 +104,7 @@ pub async fn start_login_flow() -> Result<TokenStore, String> {
     let (auth_url, csrf_token) = client
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new(
-            "https://www.googleapis.com/auth/generative-language".to_string(),
+            "https://www.googleapis.com/auth/cloud-platform".to_string(),
         ))
         .add_scope(Scope::new(
             "https://www.googleapis.com/auth/userinfo.email".to_string(),
