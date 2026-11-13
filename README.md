@@ -4,6 +4,11 @@
 
 No browser overhead. No Electron. No high RAM usage. Just a standalone, native, GPU-accelerated `.exe`.
 
+[![Website](https://img.shields.io/badge/Website-rusty--gemini.vercel.app-blue?style=flat&logo=vercel)](https://rusty-gemini.vercel.app)
+[![Privacy Policy](https://img.shields.io/badge/Legal-Privacy%20Policy-emerald?style=flat)](https://rusty-gemini.vercel.app/privacy)
+[![Terms of Service](https://img.shields.io/badge/Legal-Terms%20of%20Service-purple?style=flat)](https://rusty-gemini.vercel.app/terms)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 ---
 
 ## ⚡ Performance

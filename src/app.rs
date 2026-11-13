@@ -1662,6 +1662,14 @@ impl GeminiApp {
                                     "https://github.com/0xKahli/gemini-rust",
                                 ).on_hover_text("https://github.com/0xKahli/gemini-rust");
                             });
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Website:").size(10.5).color(Color32::from_gray(140)));
+                                ui.hyperlink_to(
+                                    RichText::new("rusty-gemini.vercel.app").size(10.5).color(Color32::from_rgb(100, 180, 255)),
+                                    "https://rusty-gemini.vercel.app",
+                                ).on_hover_text("https://rusty-gemini.vercel.app");
+                            });
                         });
                 });
         }
