@@ -1324,6 +1324,7 @@ dependencies = [
  "egui",
  "egui_commonmark",
  "futures-util",
+ "image",
  "keyring",
  "oauth2",
  "reqwest 0.12.28",

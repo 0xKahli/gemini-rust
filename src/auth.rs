@@ -188,6 +188,18 @@ pub fn clear_tokens() {
 }
 
 pub fn load_is_pro_plan() -> bool {
+    // 1. Check plan.txt in config directory
+    let p = get_config_dir().join("plan.txt");
+    if let Ok(content) = std::fs::read_to_string(&p) {
+        let trimmed = content.trim().to_lowercase();
+        if trimmed == "1" || trimmed == "true" || trimmed == "pro" {
+            return true;
+        } else if trimmed == "0" || trimmed == "false" || trimmed == "free" {
+            return false;
+        }
+    }
+
+    // 2. Check Windows User Registry
     #[cfg(windows)]
     {
         use winreg::enums::*;
@@ -199,10 +211,15 @@ pub fn load_is_pro_plan() -> bool {
             }
         }
     }
-    false
+
+    // Default to true for Google AI Pro users
+    true
 }
 
 pub fn save_is_pro_plan(is_pro: bool) {
+    let p = get_config_dir().join("plan.txt");
+    let _ = std::fs::write(&p, if is_pro { "pro" } else { "free" });
+
     #[cfg(windows)]
     {
         use winreg::enums::*;
@@ -276,6 +293,17 @@ pub async fn start_login_flow() -> Result<TokenStore, String> {
     let (email, display_name, picture_url) = user_info
         .map(|u| (u.email, u.name, u.picture))
         .unwrap_or((None, None, None));
+
+    // Download and cache profile photo locally if returned
+    if let Some(ref pic_url) = picture_url {
+        let http = reqwest::Client::new();
+        if let Ok(resp) = http.get(pic_url).send().await {
+            if let Ok(bytes) = resp.bytes().await {
+                let path = get_config_dir().join("avatar.png");
+                let _ = std::fs::write(&path, bytes);
+            }
+        }
+    }
 
     let store = TokenStore {
         access_token,
@@ -385,6 +413,10 @@ struct ModelsResponse {
 }
 
 pub async fn detect_account_plan() -> String {
+    if load_is_pro_plan() {
+        return "✦ Google AI Pro".to_string();
+    }
+
     let key = match get_gemini_api_key() {
         Some(k) => k,
         None => return "Free Plan".to_string(),
@@ -405,14 +437,9 @@ pub async fn detect_account_plan() -> String {
     match client.post(&url).json(&body).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
-                "✦ Gemini Pro".to_string()
+                "✦ Google AI Pro".to_string()
             } else {
-                let text = resp.text().await.unwrap_or_default();
-                if text.contains("Free Tier") || text.contains("limit: 0") {
-                    "Free Plan".to_string()
-                } else {
-                    "Free Plan".to_string()
-                }
+                "Free Plan".to_string()
             }
         }
         Err(_) => "Free Plan".to_string(),
@@ -485,7 +512,7 @@ pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<
         .collect();
 
     if is_pro {
-        // If Pro plan is active, ensure Gemini 4 Argon is included
+        // If Pro plan is active, ensure Gemini 4 Argon and Carbon are included
         let has_argon = models.iter().any(|m| m.name.contains("gemini-4-argon"));
         if !has_argon {
             models.insert(
@@ -498,9 +525,21 @@ pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<
                 },
             );
         }
+        let has_carbon = models.iter().any(|m| m.name.contains("gemini-4-carbon"));
+        if !has_carbon {
+            models.insert(
+                1,
+                ModelInfo {
+                    name: "models/gemini-4-carbon".to_string(),
+                    display_name: "✦ Gemini 4 (Carbon Pro)".to_string(),
+                    description: "High-throughput Gemini 4 frontier model for Pro subscribers".to_string(),
+                    supported_generation_methods: vec!["generateContent".to_string()],
+                },
+            );
+        }
     } else {
-        // Filter out Gemini 4 Argon for free tier (which has limit 0)
-        models.retain(|m| !m.name.contains("gemini-4-argon"));
+        // Filter out Gemini 4 Argon and Carbon for free tier (which has limit 0)
+        models.retain(|m| !m.name.contains("gemini-4-argon") && !m.name.contains("gemini-4-carbon"));
     }
 
     // Always ensure working Gemini 4 Hydrogen is available at the top
@@ -522,16 +561,18 @@ pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<
         let n = m.name.to_lowercase();
         if n.contains("gemini-4-argon") {
             0
-        } else if n.contains("gemini-4-hydrogen") {
+        } else if n.contains("gemini-4-carbon") {
             1
-        } else if n.contains("gemini-3-flash") {
+        } else if n.contains("gemini-4-hydrogen") {
             2
-        } else if n.contains("gemini-3.5-flash-lite") {
+        } else if n.contains("gemini-3-flash") {
             3
-        } else if n.contains("gemini-3.1-flash-lite") {
+        } else if n.contains("gemini-3.5-flash-lite") {
             4
-        } else if n.contains("gemini-flash-lite-latest") {
+        } else if n.contains("gemini-3.1-flash-lite") {
             5
+        } else if n.contains("gemini-flash-lite-latest") {
+            6
         } else {
             50
         }
