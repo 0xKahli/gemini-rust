@@ -1087,35 +1087,6 @@ impl GeminiApp {
                         self.add_new_tab();
                     }
 
-                    ui.add_space(16.0);
-
-                    // Model Selector Dropdown
-                    if let AuthState::LoggedIn { models, loading_models, .. } = &self.auth_state {
-                        if *loading_models && models.is_empty() {
-                            ui.spinner();
-                            ui.label(RichText::new("Loading models…").color(Color32::from_gray(160)));
-                        } else {
-                            let selected_name = models
-                                .get(self.selected_model_idx)
-                                .map(|m| m.display_name.as_str())
-                                .unwrap_or("Select model");
-
-                            egui::ComboBox::from_id_salt("model_select")
-                                .selected_text(RichText::new(selected_name).size(13.0).color(Color32::WHITE))
-                                .width(280.0)
-                                .show_ui(ui, |ui| {
-                                    for (i, model) in models.iter().enumerate() {
-                                        ui.selectable_value(
-                                            &mut self.selected_model_idx,
-                                            i,
-                                            &model.display_name,
-                                        )
-                                        .on_hover_text(&model.description);
-                                    }
-                                });
-                        }
-                    }
-
                     // Right items: Plan Badge + Account Profile + Settings
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
@@ -1933,7 +1904,9 @@ impl GeminiApp {
                                     self.pick_and_attach_files();
                                 }
 
-                                let available_w = (ui.available_width() - 44.0).max(100.0);
+                                let model_w = 175.0_f32;
+                                let right_reserved = 44.0 + model_w + 8.0;
+                                let available_w = (ui.available_width() - right_reserved).max(80.0);
 
                                 let (can_send, is_streaming) = if let Some(tab) = self.active_tab_mut() {
                                     let input_edit = egui::TextEdit::multiline(&mut tab.input)
@@ -1959,7 +1932,46 @@ impl GeminiApp {
                                     (false, false)
                                 };
 
-                                // Send button
+                                ui.add_space(4.0);
+
+                                // Model Selector (inside chatbox at the right)
+                                if let AuthState::LoggedIn { models, loading_models, .. } = &self.auth_state {
+                                    if *loading_models && models.is_empty() {
+                                        ui.spinner();
+                                    } else {
+                                        let selected_name = models
+                                            .get(self.selected_model_idx)
+                                            .map(|m| m.display_name.as_str())
+                                            .unwrap_or("Select model");
+
+                                        ui.scope(|ui| {
+                                            ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::from_rgb(38, 40, 46);
+                                            ui.style_mut().visuals.widgets.inactive.rounding = Rounding::same(12.0);
+                                            ui.style_mut().visuals.widgets.hovered.bg_fill = Color32::from_rgb(48, 52, 60);
+                                            ui.style_mut().visuals.widgets.hovered.rounding = Rounding::same(12.0);
+                                            ui.style_mut().visuals.widgets.active.bg_fill = Color32::from_rgb(48, 52, 60);
+                                            ui.style_mut().visuals.widgets.active.rounding = Rounding::same(12.0);
+
+                                            egui::ComboBox::from_id_salt("chatbox_model_select")
+                                                .selected_text(RichText::new(selected_name).size(12.0).color(Color32::WHITE))
+                                                .width(model_w)
+                                                .show_ui(ui, |ui| {
+                                                    for (i, model) in models.iter().enumerate() {
+                                                        ui.selectable_value(
+                                                            &mut self.selected_model_idx,
+                                                            i,
+                                                            &model.display_name,
+                                                        )
+                                                        .on_hover_text(&model.description);
+                                                    }
+                                                });
+                                        });
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+
+                                // Send button (far right)
                                 let (btn_fill, btn_color) = if is_streaming {
                                     (Color32::from_rgb(45, 47, 52), Color32::from_gray(180))
                                 } else if can_send {
