@@ -1060,16 +1060,27 @@ impl GeminiApp {
 
                     ui.add_space(10.0);
 
-                    // History Toggle Button
-                    let hist_btn = ui.add(
-                        egui::Button::new(
-                            RichText::new(if self.show_history_sidebar { "💬 Hide History" } else { "💬 History" })
-                                .size(12.5)
-                                .color(if self.show_history_sidebar { Color32::from_rgb(120, 190, 255) } else { Color32::WHITE }),
+                    // History Toggle Button (styled to match username & plan badge)
+                    let (hist_bg, hist_stroke, hist_color) = if self.show_history_sidebar {
+                        (
+                            Color32::from_rgb(25, 38, 55),
+                            Stroke::new(1.0_f32, Color32::from_rgb(66, 133, 244)),
+                            Color32::from_rgb(130, 190, 255),
                         )
-                        .fill(if self.show_history_sidebar { Color32::from_rgb(38, 48, 65) } else { Color32::from_rgb(43, 44, 48) })
-                        .rounding(Rounding::same(16.0))
-                        .stroke(Stroke::new(1.0_f32, if self.show_history_sidebar { Color32::from_rgb(66, 133, 244) } else { Color32::from_rgb(52, 54, 60) })),
+                    } else {
+                        (
+                            Color32::from_rgb(34, 35, 38),
+                            Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60)),
+                            Color32::WHITE,
+                        )
+                    };
+                    let hist_text = if self.show_history_sidebar { "💬 Hide History" } else { "💬 History" };
+                    let hist_btn = ui.add_sized(
+                        Vec2::new(0.0, 28.0),
+                        egui::Button::new(RichText::new(hist_text).size(12.0).color(hist_color).strong())
+                            .fill(hist_bg)
+                            .rounding(Rounding::same(14.0))
+                            .stroke(hist_stroke),
                     ).on_hover_text("Toggle Previous Conversations (Ctrl+H)");
                     if hist_btn.clicked() {
                         self.show_history_sidebar = !self.show_history_sidebar;
@@ -1077,11 +1088,13 @@ impl GeminiApp {
 
                     ui.add_space(8.0);
 
-                    // New Chat Button
-                    let new_chat_btn = ui.add(
-                        egui::Button::new(RichText::new("✨ + New chat").size(13.0).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(43, 44, 48))
-                            .rounding(Rounding::same(16.0)),
+                    // New Chat Button (styled to match username & plan badge)
+                    let new_chat_btn = ui.add_sized(
+                        Vec2::new(0.0, 28.0),
+                        egui::Button::new(RichText::new("✨ + New chat").size(12.0).color(Color32::WHITE).strong())
+                            .fill(Color32::from_rgb(34, 35, 38))
+                            .rounding(Rounding::same(14.0))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60))),
                     ).on_hover_text("Open new conversation tab (Ctrl+T)");
                     if new_chat_btn.clicked() {
                         self.add_new_tab();
@@ -1098,17 +1111,15 @@ impl GeminiApp {
                                 .to_string();
                             let email = tokens.email.clone();
 
-                            // Settings button
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("⚙️ Settings").size(12.5).color(Color32::from_gray(210)))
-                                        .fill(Color32::from_rgb(34, 35, 38))
-                                        .rounding(Rounding::same(16.0))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60))),
-                                )
-                                .on_hover_text("Open Settings & Customizations")
-                                .clicked()
-                            {
+                            // Settings button (icon only, matching username/badge elements)
+                            let settings_btn = ui.add_sized(
+                                Vec2::new(32.0, 28.0),
+                                egui::Button::new(RichText::new("⚙").size(15.0).color(Color32::from_gray(210)))
+                                    .fill(Color32::from_rgb(34, 35, 38))
+                                    .rounding(Rounding::same(14.0))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60))),
+                            ).on_hover_text("Preferences & Settings");
+                            if settings_btn.clicked() {
                                 self.show_settings = !self.show_settings;
                             }
 
