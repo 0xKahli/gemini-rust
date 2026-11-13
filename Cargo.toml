@@ -1,0 +1,30 @@
+[package]
+name = "gemini_client"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gemini_client"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+egui_commonmark = { version = "0.19", features = ["pulldown_cmark"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+futures-util = "0.3"
+oauth2 = "4"
+webbrowser = "1"
+keyring = "3"
+tiny_http = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
