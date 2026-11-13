@@ -25,6 +25,9 @@ url = "2"
 winreg = "0.50"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
 [profile.release]
 opt-level = 3
 lto = true

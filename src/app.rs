@@ -209,6 +209,7 @@ pub struct GeminiApp {
     history_search: String,
     stored_conversations: Vec<StoredConversation>,
     confirm_delete_id: Option<String>,
+    sparkle_texture: Option<egui::TextureHandle>,
 
     // Runtime & async channels
     runtime: Arc<tokio::runtime::Runtime>,
@@ -292,6 +293,7 @@ impl GeminiApp {
             history_search: String::new(),
             stored_conversations,
             confirm_delete_id: None,
+            sparkle_texture: None,
             runtime,
             auth_rx: None,
         }
@@ -506,6 +508,25 @@ impl GeminiApp {
                 self.avatar_texture = Some(tex.clone());
                 return Some(tex);
             }
+        }
+
+        None
+    }
+
+    fn get_sparkle_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if let Some(ref tex) = self.sparkle_texture {
+            return Some(tex.clone());
+        }
+
+        let png_bytes = include_bytes!("../assets/icon.png");
+        if let Ok(img) = image::load_from_memory(png_bytes) {
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let pixels = rgba.into_raw();
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+            let tex = ctx.load_texture("gemini_sparkle_icon", color_image, egui::TextureOptions::LINEAR);
+            self.sparkle_texture = Some(tex.clone());
+            return Some(tex);
         }
 
         None
@@ -906,6 +927,8 @@ impl GeminiApp {
     }
 
     fn draw_chat_ui(&mut self, ctx: &egui::Context) {
+        let sparkle_tex = self.get_sparkle_texture(ctx);
+
         // ── Top Navigation Bar ────────────────────────────────────────────────
         egui::TopBottomPanel::top("top_bar")
             .frame(
@@ -916,9 +939,16 @@ impl GeminiApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    // Logo
+                    // Logo with Official Aurora Sparkle Icon
+                    if let Some(ref tex) = sparkle_tex {
+                        ui.add(
+                            egui::Image::new(tex)
+                                .fit_to_exact_size(egui::vec2(22.0, 22.0)),
+                        );
+                        ui.add_space(6.0);
+                    }
                     ui.label(
-                        RichText::new("✦ Gemini")
+                        RichText::new("Gemini")
                             .size(18.0)
                             .color(Color32::from_rgb(120, 190, 255))
                             .strong(),
@@ -1256,7 +1286,7 @@ impl GeminiApp {
                                         );
                                     }
 
-                                    // Left: Tab Icon (Chat bubble or spinner)
+                                    // Left: Tab Icon (Aurora sparkle or spinner)
                                     let icon_center = egui::pos2(tab_rect.left() + 15.0, tab_rect.center().y);
                                     if tab.is_streaming {
                                         ui.painter().text(
@@ -1265,6 +1295,14 @@ impl GeminiApp {
                                             "⏳",
                                             egui::FontId::proportional(12.0),
                                             Color32::from_rgb(120, 190, 255),
+                                        );
+                                    } else if let Some(ref tex) = sparkle_tex {
+                                        let icon_rect = egui::Rect::from_center_size(icon_center, egui::vec2(14.0, 14.0));
+                                        ui.painter().image(
+                                            tex.id(),
+                                            icon_rect,
+                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                            Color32::WHITE,
                                         );
                                     } else {
                                         ui.painter().text(
@@ -1822,7 +1860,15 @@ impl GeminiApp {
                         let first_name = user_name.split_whitespace().next().unwrap_or("there");
 
                         ui.vertical_centered(|ui| {
-                            ui.add_space(ui.available_height() / 8.0);
+                            ui.add_space(ui.available_height() / 9.0);
+
+                            if let Some(ref tex) = sparkle_tex {
+                                ui.add(
+                                    egui::Image::new(tex)
+                                        .fit_to_exact_size(egui::vec2(52.0, 52.0)),
+                                );
+                                ui.add_space(6.0);
+                            }
 
                             ui.label(
                                 RichText::new(format!("✦ Hello, {}", first_name))
