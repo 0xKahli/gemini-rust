@@ -91,6 +91,10 @@ pub async fn stream_message(
             let _ = tx
                 .send("[🔒 This model requires an active Gemini Pro / Advanced subscription. Free tier accounts have 0 quota for this model. Please select Gemini 4 (Hydrogen) or Gemini 3 Flash from the model selector.]".to_string())
                 .await;
+        } else if text.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+            let _ = tx
+                .send("[🔒 Authentication scope insufficient: Google OAuth access tokens do not have direct Generative Language API scopes by default. Please verify your GEMINI_API_KEY in Settings or environment variables.]".to_string())
+                .await;
         } else {
             let _ = tx.send(format!("[API Error {}: {}]", status, text)).await;
         }

@@ -61,6 +61,13 @@ pub fn get_gemini_api_key() -> Option<String> {
             return Some(trimmed.to_string());
         }
     }
+    let p = get_config_dir().join("api_key.txt");
+    if let Ok(content) = std::fs::read_to_string(&p) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
     #[cfg(windows)]
     {
         use winreg::enums::*;

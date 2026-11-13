@@ -69,6 +69,38 @@ fn default_models(is_pro: bool) -> Vec<ModelInfo> {
     list
 }
 
+// ── Multi-Tab Conversation Struct ───────────────────────────────────────────
+
+pub struct ConversationTab {
+    pub id: u64,
+    pub title: String,
+    pub history: Vec<Message>,
+    pub input: String,
+    pub is_streaming: bool,
+    pub pending_response: String,
+    pub copied_idx: Option<usize>,
+    pub scroll_to_bottom: bool,
+    pub chat_rx: Option<mpsc::Receiver<String>>,
+    pub markdown_cache: CommonMarkCache,
+}
+
+impl ConversationTab {
+    pub fn new(id: u64) -> Self {
+        Self {
+            id,
+            title: "New chat".to_string(),
+            history: Vec::new(),
+            input: String::new(),
+            is_streaming: false,
+            pending_response: String::new(),
+            copied_idx: None,
+            scroll_to_bottom: true,
+            chat_rx: None,
+            markdown_cache: CommonMarkCache::default(),
+        }
+    }
+}
+
 enum AuthState {
     LoggedOut,
     LoggingIn,
@@ -87,24 +119,19 @@ pub struct GeminiApp {
     detected_plan_name: String,
     avatar_texture: Option<egui::TextureHandle>,
 
-    // Chat
-    history: Vec<Message>,
-    input: String,
+    // Multi-tab Conversations (Browser-style)
+    tabs: Vec<ConversationTab>,
+    active_tab_id: u64,
+    next_tab_id: u64,
+
+    // App state
     selected_model_idx: usize,
     system_prompt: String,
     show_settings: bool,
 
-    // Streaming
+    // Runtime & async channels
     runtime: Arc<tokio::runtime::Runtime>,
     auth_rx: Option<mpsc::Receiver<AuthTaskResult>>,
-    chat_rx: Option<mpsc::Receiver<String>>,
-    is_streaming: bool,
-    pending_response: String,
-
-    // UI Feedback
-    copied_idx: Option<usize>,
-    markdown_cache: CommonMarkCache,
-    scroll_to_bottom: bool,
 }
 
 enum AuthTaskResult {
@@ -143,25 +170,93 @@ impl GeminiApp {
             None => AuthState::LoggedOut,
         };
 
+        let initial_tab = ConversationTab::new(1);
+
         Self {
             auth_state,
             is_pro_plan,
             detected_plan_name,
             avatar_texture: None,
-            history: Vec::new(),
-            input: String::new(),
+            tabs: vec![initial_tab],
+            active_tab_id: 1,
+            next_tab_id: 2,
             selected_model_idx: 0,
             system_prompt: String::new(),
             show_settings: false,
             runtime,
             auth_rx: None,
-            chat_rx: None,
-            is_streaming: false,
-            pending_response: String::new(),
-            copied_idx: None,
-            markdown_cache: CommonMarkCache::default(),
-            scroll_to_bottom: false,
         }
+    }
+
+    // ── Tab Management Helpers ────────────────────────────────────────────────
+
+    pub fn add_new_tab(&mut self) -> u64 {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(ConversationTab::new(id));
+        self.active_tab_id = id;
+        id
+    }
+
+    pub fn close_tab(&mut self, id: u64) {
+        if self.tabs.len() <= 1 {
+            // Keep at least one tab open; reset it to fresh state
+            if let Some(tab) = self.tabs.first_mut() {
+                tab.title = "New chat".to_string();
+                tab.history.clear();
+                tab.input.clear();
+                tab.is_streaming = false;
+                tab.pending_response.clear();
+                tab.copied_idx = None;
+                tab.chat_rx = None;
+                tab.scroll_to_bottom = true;
+            }
+            return;
+        }
+
+        if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
+            self.tabs.remove(pos);
+            if self.active_tab_id == id {
+                let new_idx = if pos >= self.tabs.len() {
+                    self.tabs.len() - 1
+                } else {
+                    pos
+                };
+                self.active_tab_id = self.tabs[new_idx].id;
+            }
+        }
+    }
+
+    pub fn next_tab(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        if let Some(pos) = self.tabs.iter().position(|t| t.id == self.active_tab_id) {
+            let next_pos = (pos + 1) % self.tabs.len();
+            self.active_tab_id = self.tabs[next_pos].id;
+        }
+    }
+
+    pub fn prev_tab(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        if let Some(pos) = self.tabs.iter().position(|t| t.id == self.active_tab_id) {
+            let prev_pos = if pos == 0 {
+                self.tabs.len() - 1
+            } else {
+                pos - 1
+            };
+            self.active_tab_id = self.tabs[prev_pos].id;
+        }
+    }
+
+    pub fn active_tab_mut(&mut self) -> Option<&mut ConversationTab> {
+        self.tabs.iter_mut().find(|t| t.id == self.active_tab_id)
+    }
+
+    pub fn active_tab(&self) -> Option<&ConversationTab> {
+        self.tabs.iter().find(|t| t.id == self.active_tab_id)
     }
 
     fn get_avatar_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
@@ -361,12 +456,29 @@ impl GeminiApp {
         }
     }
 
-    // ── Chat helpers ──────────────────────────────────────────────────────────
+    // ── Chat & Background Streaming Helpers ────────────────────────────────────
 
     fn send_message(&mut self, ctx: egui::Context) {
-        let input = self.input.trim().to_string();
-        if input.is_empty() || self.is_streaming {
+        let tab = match self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let input = tab.input.trim().to_string();
+        if input.is_empty() || tab.is_streaming {
             return;
+        }
+
+        // Auto-update tab title if this is the first message or "New chat"
+        if tab.title == "New chat" || tab.title.is_empty() {
+            let first_line = input.lines().next().unwrap_or("Chat").trim();
+            let chars: Vec<char> = first_line.chars().collect();
+            tab.title = if chars.len() > 20 {
+                let s: String = chars[..18].iter().collect();
+                format!("{}…", s)
+            } else {
+                first_line.to_string()
+            };
         }
 
         let auth = if let Some(key) = get_gemini_api_key() {
@@ -390,16 +502,16 @@ impl GeminiApp {
             _ => "gemini-4-hydrogen".to_string(),
         };
 
-        self.history.push(Message::user(&input));
-        self.input.clear();
-        self.is_streaming = true;
-        self.pending_response.clear();
-        self.scroll_to_bottom = true;
+        tab.history.push(Message::user(&input));
+        tab.input.clear();
+        tab.is_streaming = true;
+        tab.pending_response.clear();
+        tab.scroll_to_bottom = true;
 
         let (tx, rx) = mpsc::channel::<String>(256);
-        self.chat_rx = Some(rx);
+        tab.chat_rx = Some(rx);
 
-        let mut history_to_send = self.history.clone();
+        let mut history_to_send = tab.history.clone();
         if !self.system_prompt.is_empty() && history_to_send.len() == 1 {
             history_to_send.insert(
                 0,
@@ -424,32 +536,37 @@ impl GeminiApp {
     }
 
     fn poll_chat(&mut self) {
-        if !self.is_streaming { return; }
+        // Poll all tabs concurrently so background tabs stream uninterrupted
+        for tab in &mut self.tabs {
+            if !tab.is_streaming {
+                continue;
+            }
 
-        let mut done = false;
-        if let Some(rx) = &mut self.chat_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(token) => {
-                        self.pending_response.push_str(&token);
-                        self.scroll_to_bottom = true;
-                    }
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        done = true;
-                        break;
+            let mut done = false;
+            if let Some(rx) = &mut tab.chat_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(token) => {
+                            tab.pending_response.push_str(&token);
+                            tab.scroll_to_bottom = true;
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            done = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if done {
-            if !self.pending_response.is_empty() {
-                self.history.push(Message::model(self.pending_response.clone()));
+            if done {
+                if !tab.pending_response.is_empty() {
+                    tab.history.push(Message::model(tab.pending_response.clone()));
+                }
+                tab.pending_response.clear();
+                tab.is_streaming = false;
+                tab.chat_rx = None;
             }
-            self.pending_response.clear();
-            self.is_streaming = false;
-            self.chat_rx = None;
         }
     }
 }
@@ -462,7 +579,24 @@ impl eframe::App for GeminiApp {
         self.poll_chat();
         self.refresh_token_if_needed(ctx.clone());
 
-        if self.is_streaming || matches!(self.auth_state, AuthState::LoggingIn) {
+        // Keyboard Shortcuts (Browser-style)
+        // Ctrl+T: New Tab
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::T)) {
+            self.add_new_tab();
+        }
+        // Ctrl+W: Close Current Tab
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::W)) {
+            self.close_tab(self.active_tab_id);
+        }
+        // Ctrl+Tab / Ctrl+Shift+Tab: Cycle Tabs
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(egui::Key::Tab)) {
+            self.prev_tab();
+        } else if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::Tab)) {
+            self.next_tab();
+        }
+
+        // Repaint if any tab is streaming or auth in progress
+        if self.tabs.iter().any(|t| t.is_streaming) || matches!(self.auth_state, AuthState::LoggingIn) {
             ctx.request_repaint();
         }
 
@@ -568,12 +702,9 @@ impl GeminiApp {
                         egui::Button::new(RichText::new("✨ + New chat").size(13.0).color(Color32::WHITE))
                             .fill(Color32::from_rgb(43, 44, 48))
                             .rounding(Rounding::same(16.0)),
-                    );
+                    ).on_hover_text("Open new conversation tab (Ctrl+T)");
                     if new_chat_btn.clicked() {
-                        self.history.clear();
-                        self.pending_response.clear();
-                        self.is_streaming = false;
-                        self.copied_idx = None;
+                        self.add_new_tab();
                     }
 
                     ui.add_space(16.0);
@@ -605,7 +736,7 @@ impl GeminiApp {
                         }
                     }
 
-                    // Right items: Plan Badge + Account + Settings
+                    // Right items: Plan Badge + Account Profile + Settings
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
                             let name = tokens
@@ -616,7 +747,7 @@ impl GeminiApp {
                                 .to_string();
                             let email = tokens.email.clone();
 
-                            // Settings button with icon
+                            // Settings button
                             if ui
                                 .add(
                                     egui::Button::new(RichText::new("⚙️ Settings").size(12.5).color(Color32::from_gray(210)))
@@ -754,7 +885,9 @@ impl GeminiApp {
                                             ).clicked() {
                                                 clear_tokens();
                                                 self.auth_state = AuthState::LoggedOut;
-                                                self.history.clear();
+                                                self.tabs = vec![ConversationTab::new(1)];
+                                                self.active_tab_id = 1;
+                                                self.next_tab_id = 2;
                                                 self.avatar_texture = None;
                                                 ui.memory_mut(|mem| mem.close_popup());
                                             }
@@ -787,6 +920,136 @@ impl GeminiApp {
                         }
                     });
                 });
+            });
+
+        // ── Browser-style Tab Bar ─────────────────────────────────────────────
+        egui::TopBottomPanel::top("browser_tabs")
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(22, 23, 26))
+                    .inner_margin(egui::Margin {
+                        left: 14.0,
+                        right: 14.0,
+                        top: 6.0,
+                        bottom: 0.0,
+                    })
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 39, 44))),
+            )
+            .show(ctx, |ui| {
+                let mut switch_to_tab = None;
+                let mut close_tab_id = None;
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+
+                    egui::ScrollArea::horizontal()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for tab in &self.tabs {
+                                    let is_active = tab.id == self.active_tab_id;
+                                    let (bg_color, stroke_color, text_color) = if is_active {
+                                        (
+                                            Color32::from_rgb(34, 36, 42),
+                                            Stroke::new(1.5_f32, Color32::from_rgb(66, 133, 244)),
+                                            Color32::WHITE,
+                                        )
+                                    } else {
+                                        (
+                                            Color32::from_rgb(25, 26, 29),
+                                            Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 49)),
+                                            Color32::from_gray(170),
+                                        )
+                                    };
+
+                                    let tab_frame = egui::Frame::none()
+                                        .fill(bg_color)
+                                        .rounding(Rounding {
+                                            nw: 8.0,
+                                            ne: 8.0,
+                                            sw: 0.0,
+                                            se: 0.0,
+                                        })
+                                        .stroke(stroke_color)
+                                        .inner_margin(egui::Margin::symmetric(12.0, 7.0));
+
+                                    let tab_resp = tab_frame.show(ui, |ui| {
+                                        ui.set_min_width(110.0);
+                                        ui.set_max_width(210.0);
+                                        ui.horizontal(|ui| {
+                                            if tab.is_streaming {
+                                                ui.spinner();
+                                            } else {
+                                                ui.label(RichText::new("💬").size(12.0));
+                                            }
+                                            ui.add_space(4.0);
+
+                                            let title_str = if tab.title.trim().is_empty() {
+                                                "New chat"
+                                            } else {
+                                                &tab.title
+                                            };
+                                            let label = ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(title_str)
+                                                        .size(12.5)
+                                                        .color(text_color)
+                                                        .strong(),
+                                                )
+                                                .truncate()
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if label.clicked() {
+                                                switch_to_tab = Some(tab.id);
+                                            }
+
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                let close_btn = ui.add(
+                                                    egui::Button::new(
+                                                        RichText::new("✕")
+                                                            .size(11.0)
+                                                            .color(if is_active {
+                                                                Color32::from_gray(200)
+                                                            } else {
+                                                                Color32::from_gray(140)
+                                                            }),
+                                                    )
+                                                    .fill(Color32::TRANSPARENT)
+                                                    .frame(false),
+                                                ).on_hover_text("Close tab (Ctrl+W)");
+
+                                                if close_btn.clicked() {
+                                                    close_tab_id = Some(tab.id);
+                                                }
+                                            });
+                                        });
+                                    });
+
+                                    if tab_resp.response.interact(egui::Sense::click()).clicked() {
+                                        switch_to_tab = Some(tab.id);
+                                    }
+                                }
+
+                                // ➕ Add new tab button
+                                let add_btn = ui.add(
+                                    egui::Button::new(RichText::new("➕").size(12.0).color(Color32::from_gray(210)))
+                                        .fill(Color32::from_rgb(33, 35, 39))
+                                        .rounding(Rounding::same(6.0)),
+                                ).on_hover_text("New tab (Ctrl+T)");
+
+                                if add_btn.clicked() {
+                                    self.add_new_tab();
+                                }
+                            });
+                        });
+                });
+
+                if let Some(id) = switch_to_tab {
+                    self.active_tab_id = id;
+                }
+                if let Some(id) = close_tab_id {
+                    self.close_tab(id);
+                }
             });
 
         // ── Settings Drawer Panel ─────────────────────────────────────────────
@@ -859,16 +1122,19 @@ impl GeminiApp {
                     if ui
                         .add_sized(
                             Vec2::new(ui.available_width(), 34.0),
-                            egui::Button::new(RichText::new("🗑️ Clear conversation history").color(Color32::WHITE))
+                            egui::Button::new(RichText::new("🗑️ Clear current conversation").color(Color32::WHITE))
                                 .fill(Color32::from_rgb(45, 47, 52))
                                 .rounding(Rounding::same(8.0)),
                         )
                         .clicked()
                     {
-                        self.history.clear();
-                        self.pending_response.clear();
-                        self.is_streaming = false;
-                        self.copied_idx = None;
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.history.clear();
+                            tab.pending_response.clear();
+                            tab.is_streaming = false;
+                            tab.copied_idx = None;
+                            tab.title = "New chat".to_string();
+                        }
                     }
 
                     ui.add_space(12.0);
@@ -885,6 +1151,7 @@ impl GeminiApp {
         }
 
         // ── Bottom Floating Input Area ────────────────────────────────────────
+        let mut should_send = false;
         egui::TopBottomPanel::bottom("input_bar")
             .frame(
                 egui::Frame::none()
@@ -901,22 +1168,28 @@ impl GeminiApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let available_w = ui.available_width() - 56.0;
-                            let input_edit = egui::TextEdit::multiline(&mut self.input)
-                                .hint_text("Ask Gemini anything… (Enter to send, Shift+Enter for newline)")
-                                .desired_rows(2)
-                                .desired_width(available_w);
 
-                            let response = ui.add(input_edit);
+                            let (has_text, is_streaming) = if let Some(tab) = self.active_tab_mut() {
+                                let input_edit = egui::TextEdit::multiline(&mut tab.input)
+                                    .hint_text("Ask Gemini anything… (Enter to send, Shift+Enter for newline)")
+                                    .desired_rows(2)
+                                    .desired_width(available_w);
 
-                            if response.has_focus()
-                                && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                            {
-                                self.send_message(ctx.clone());
-                            }
+                                let response = ui.add(input_edit);
+
+                                if response.has_focus()
+                                    && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                                {
+                                    should_send = true;
+                                }
+
+                                (!tab.input.trim().is_empty(), tab.is_streaming)
+                            } else {
+                                (false, false)
+                            };
 
                             // Send button
-                            let has_text = !self.input.trim().is_empty();
-                            let btn_fill = if self.is_streaming {
+                            let btn_fill = if is_streaming {
                                 Color32::from_rgb(50, 50, 55)
                             } else if has_text {
                                 Color32::from_rgb(26, 115, 232)
@@ -924,7 +1197,7 @@ impl GeminiApp {
                                 Color32::from_rgb(45, 46, 50)
                             };
 
-                            let btn_icon = if self.is_streaming { "⏳" } else { "➤" };
+                            let btn_icon = if is_streaming { "⏳" } else { "➤" };
                             let send_btn = ui.add_sized(
                                 Vec2::new(42.0, 38.0),
                                 egui::Button::new(RichText::new(btn_icon).size(16.0).color(Color32::WHITE))
@@ -933,7 +1206,7 @@ impl GeminiApp {
                             );
 
                             if send_btn.clicked() {
-                                self.send_message(ctx.clone());
+                                should_send = true;
                             }
                         });
                     });
@@ -949,19 +1222,35 @@ impl GeminiApp {
                 });
             });
 
+        if should_send {
+            self.send_message(ctx.clone());
+        }
+
         // ── Main Chat Area ────────────────────────────────────────────────────
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(19, 19, 20)))
             .show(ctx, |ui| {
+                let mut card_clicked_prompt: Option<String> = None;
+                let mut copy_target: Option<(usize, String)> = None;
+
+                let scroll_to_bottom = self.active_tab().map(|t| t.scroll_to_bottom).unwrap_or(false);
+
                 let scroll = egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
-                    .stick_to_bottom(self.scroll_to_bottom);
+                    .stick_to_bottom(scroll_to_bottom);
 
                 scroll.show(ui, |ui| {
                     ui.add_space(16.0);
 
+                    // Check active tab state
+                    let (is_empty, is_streaming) = if let Some(tab) = self.active_tab() {
+                        (tab.history.is_empty(), tab.is_streaming)
+                    } else {
+                        (true, false)
+                    };
+
                     // ── Empty State / Welcome Screen ──────────────────────────
-                    if self.history.is_empty() && !self.is_streaming {
+                    if is_empty && !is_streaming {
                         let user_name = if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
                             tokens.display_name.clone().unwrap_or_else(|| "there".to_string())
                         } else {
@@ -1014,8 +1303,7 @@ impl GeminiApp {
                                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                                         .clicked()
                                     {
-                                        self.input = prompt.to_string();
-                                        self.send_message(ctx.clone());
+                                        card_clicked_prompt = Some(prompt.to_string());
                                     }
                                 });
                                 ui.add_space(8.0);
@@ -1023,27 +1311,92 @@ impl GeminiApp {
                         });
                     }
 
-                    // ── Conversation Messages ─────────────────────────────────
-                    let mut copy_target = None;
+                    // ── Active Tab Conversation Messages ──────────────────────
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
+                        let ConversationTab {
+                            ref history,
+                            ref mut markdown_cache,
+                            ref copied_idx,
+                            is_streaming,
+                            ref pending_response,
+                            ..
+                        } = *tab;
 
-                    for (idx, msg) in self.history.iter().enumerate() {
-                        let is_user = msg.role == Role::User;
-                        let is_copied = self.copied_idx == Some(idx);
+                        for (idx, msg) in history.iter().enumerate() {
+                            let is_user = msg.role == Role::User;
+                            let is_copied = *copied_idx == Some(idx);
 
-                        if is_user {
-                            // User Message Bubble (Right-aligned)
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                                egui::Frame::none()
-                                    .fill(Color32::from_rgb(43, 52, 69))
-                                    .rounding(Rounding::same(16.0))
-                                    .inner_margin(egui::Margin::symmetric(16.0, 12.0))
-                                    .show(ui, |ui| {
-                                        ui.set_max_width(ui.available_width() * 0.72);
-                                        ui.label(RichText::new(&msg.content).size(14.0).color(Color32::WHITE));
-                                    });
-                            });
-                        } else {
-                            // Gemini Response Card (Left-aligned)
+                            if is_user {
+                                // User Message Bubble (Right-aligned)
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                    egui::Frame::none()
+                                        .fill(Color32::from_rgb(43, 52, 69))
+                                        .rounding(Rounding::same(16.0))
+                                        .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+                                        .show(ui, |ui| {
+                                            ui.set_max_width(ui.available_width() * 0.72);
+                                            ui.label(RichText::new(&msg.content).size(14.0).color(Color32::WHITE));
+                                        });
+                                });
+                            } else {
+                                // Gemini Response Card (Left-aligned)
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                                    egui::Frame::none()
+                                        .fill(Color32::from_rgb(27, 28, 30))
+                                        .rounding(Rounding::same(14.0))
+                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 48)))
+                                        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                                        .show(ui, |ui| {
+                                            ui.set_max_width(ui.available_width() * 0.85);
+                                            ui.vertical(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new("✦ Gemini")
+                                                            .size(13.0)
+                                                            .color(Color32::from_rgb(120, 190, 255))
+                                                            .strong(),
+                                                    );
+                                                });
+                                                ui.add_space(4.0);
+
+                                                // Markdown Content
+                                                CommonMarkViewer::new().show(
+                                                    ui,
+                                                    markdown_cache,
+                                                    &msg.content,
+                                                );
+
+                                                ui.add_space(8.0);
+                                                ui.horizontal(|ui| {
+                                                    let copy_label = if is_copied { "Copied! ✓" } else { "📋 Copy" };
+                                                    let copy_color = if is_copied {
+                                                        Color32::from_rgb(100, 220, 140)
+                                                    } else {
+                                                        Color32::from_gray(160)
+                                                    };
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                RichText::new(copy_label).size(11.0).color(copy_color),
+                                                            )
+                                                            .fill(Color32::from_rgb(38, 40, 44))
+                                                            .rounding(Rounding::same(8.0)),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        copy_target = Some((idx, msg.content.clone()));
+                                                    }
+                                                });
+                                            });
+                                        });
+                                });
+                            }
+
+                            ui.add_space(10.0);
+                        }
+
+                        // Live Streaming Bubble
+                        if is_streaming {
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                 egui::Frame::none()
                                     .fill(Color32::from_rgb(27, 28, 30))
@@ -1054,95 +1407,51 @@ impl GeminiApp {
                                         ui.set_max_width(ui.available_width() * 0.85);
                                         ui.vertical(|ui| {
                                             ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.add_space(6.0);
                                                 ui.label(
-                                                    RichText::new("✦ Gemini")
+                                                    RichText::new("Gemini is generating…")
                                                         .size(13.0)
-                                                        .color(Color32::from_rgb(120, 190, 255))
-                                                        .strong(),
+                                                        .color(Color32::from_rgb(120, 190, 255)),
                                                 );
                                             });
-                                            ui.add_space(4.0);
-
-                                            // Markdown Content
-                                            CommonMarkViewer::new().show(
-                                                ui,
-                                                &mut self.markdown_cache,
-                                                &msg.content,
-                                            );
-
-                                            ui.add_space(8.0);
-                                            ui.horizontal(|ui| {
-                                                let copy_label = if is_copied { "Copied! ✓" } else { "📋 Copy" };
-                                                let copy_color = if is_copied {
-                                                    Color32::from_rgb(100, 220, 140)
-                                                } else {
-                                                    Color32::from_gray(160)
-                                                };
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new(
-                                                            RichText::new(copy_label).size(11.0).color(copy_color),
-                                                        )
-                                                        .fill(Color32::from_rgb(38, 40, 44))
-                                                        .rounding(Rounding::same(8.0)),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    copy_target = Some((idx, msg.content.clone()));
-                                                }
-                                            });
+                                            ui.add_space(6.0);
+                                            if !pending_response.is_empty() {
+                                                CommonMarkViewer::new().show(
+                                                    ui,
+                                                    markdown_cache,
+                                                    pending_response,
+                                                );
+                                            }
                                         });
                                     });
                             });
+                            ui.add_space(10.0);
                         }
-
-                        ui.add_space(10.0);
-                    }
-
-                    // Handle Copy Request
-                    if let Some((idx, text)) = copy_target {
-                        ui.output_mut(|o| o.copied_text = text);
-                        self.copied_idx = Some(idx);
-                    }
-
-                    // Live Streaming Bubble
-                    if self.is_streaming {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                            egui::Frame::none()
-                                .fill(Color32::from_rgb(27, 28, 30))
-                                .rounding(Rounding::same(14.0))
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 48)))
-                                .inner_margin(egui::Margin::symmetric(16.0, 14.0))
-                                .show(ui, |ui| {
-                                    ui.set_max_width(ui.available_width() * 0.85);
-                                    ui.vertical(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.spinner();
-                                            ui.add_space(6.0);
-                                            ui.label(
-                                                RichText::new("Gemini is generating…")
-                                                    .size(13.0)
-                                                    .color(Color32::from_rgb(120, 190, 255)),
-                                            );
-                                        });
-                                        ui.add_space(6.0);
-                                        if !self.pending_response.is_empty() {
-                                            CommonMarkViewer::new().show(
-                                                ui,
-                                                &mut self.markdown_cache,
-                                                &self.pending_response,
-                                            );
-                                        }
-                                    });
-                                });
-                        });
-                        ui.add_space(10.0);
                     }
 
                     ui.add_space(16.0);
                 });
 
-                self.scroll_to_bottom = false;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.scroll_to_bottom = false;
+                }
+
+                // Handle Prompt card click
+                if let Some(prompt) = card_clicked_prompt {
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.input = prompt;
+                    }
+                    self.send_message(ctx.clone());
+                }
+
+                // Handle Copy Request
+                if let Some((idx, text)) = copy_target {
+                    ui.output_mut(|o| o.copied_text = text);
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.copied_idx = Some(idx);
+                    }
+                }
             });
     }
 }
