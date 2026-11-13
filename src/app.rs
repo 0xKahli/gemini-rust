@@ -1770,19 +1770,17 @@ impl GeminiApp {
                         .fill(Color32::from_rgb(30, 31, 35))
                         .rounding(Rounding::same(24.0))
                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 55, 62)))
-                        .inner_margin(egui::Margin::symmetric(18.0, 8.0))
+                        .inner_margin(egui::Margin::symmetric(18.0, 10.0))
                         .show(ui, |ui| {
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                 let available_w = (ui.available_width() - 44.0).max(100.0);
 
                                 let (has_text, is_streaming) = if let Some(tab) = self.active_tab_mut() {
                                     let input_edit = egui::TextEdit::multiline(&mut tab.input)
-                                        .hint_text("Ask Gemini anything…")
+                                        .hint_text("Chat with Gemini…")
                                         .frame(false)
                                         .vertical_align(egui::Align::Center)
-                                        .horizontal_align(egui::Align::Center)
-                                        .font(egui::FontId::proportional(14.5))
-                                        .margin(egui::Margin::symmetric(0.0, 4.0))
+                                        .horizontal_align(egui::Align::Min)
                                         .desired_rows(1)
                                         .desired_width(available_w);
 
@@ -1799,7 +1797,7 @@ impl GeminiApp {
                                     (false, false)
                                 };
 
-                                // Send button (Centered vertically with text)
+                                // Send button
                                 let (btn_fill, btn_color) = if is_streaming {
                                     (Color32::from_rgb(45, 47, 52), Color32::from_gray(180))
                                 } else if has_text {
@@ -1810,10 +1808,10 @@ impl GeminiApp {
 
                                 let btn_icon = if is_streaming { "⏳" } else { "➤" };
                                 let send_btn = ui.add_sized(
-                                    Vec2::new(36.0, 36.0),
+                                    Vec2::new(36.0, 34.0),
                                     egui::Button::new(RichText::new(btn_icon).size(15.0).color(btn_color))
                                         .fill(btn_fill)
-                                        .rounding(Rounding::same(18.0)),
+                                        .rounding(Rounding::same(17.0)),
                                 ).on_hover_text("Send message (Enter)");
 
                                 if send_btn.clicked() {
