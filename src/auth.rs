@@ -398,7 +398,7 @@ fn wait_for_redirect_code(csrf_token: CsrfToken) -> Result<String, String> {
 
         if let Some(auth_code) = code {
             let html = "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
-                <h2>✅ Signed in!</h2><p>You can close this tab and return to Gemini Client.</p>\
+                <h2>✅ Signed in!</h2><p>You can close this tab and return to Rusty Gemini.</p>\
                 </body></html>";
             let response = tiny_http::Response::from_string(html)
                 .with_header("Content-Type: text/html".parse::<tiny_http::Header>().unwrap());

@@ -1,4 +1,4 @@
-# gemini-rust
+# Rusty Gemini ✦
 
 > A lightning-fast, native Windows desktop client for Google Gemini — built in 100% Rust.
 
@@ -96,6 +96,13 @@ gemini-client/
 ├── Cargo.toml       # Dependencies & build configuration
 └── README.md
 ```
+
+---
+
+## 👤 Author & Credits
+
+Developed by **Kahli** ([@0xKahli](https://github.com/0xKahli)).  
+Repository: [https://github.com/0xKahli/gemini-rust](https://github.com/0xKahli/gemini-rust)
 
 ---
 

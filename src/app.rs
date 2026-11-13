@@ -980,7 +980,7 @@ impl GeminiApp {
                     );
                     ui.add_space(10.0);
                     ui.label(
-                        RichText::new("Gemini")
+                        RichText::new("Rusty Gemini")
                             .size(32.0)
                             .color(Color32::WHITE)
                             .strong(),
@@ -1052,7 +1052,7 @@ impl GeminiApp {
                         ui.add_space(6.0);
                     }
                     ui.label(
-                        RichText::new("Gemini")
+                        RichText::new("Rusty Gemini")
                             .size(18.0)
                             .color(Color32::from_rgb(120, 190, 255))
                             .strong(),
@@ -1625,6 +1625,41 @@ impl GeminiApp {
                                 .size(11.0),
                         );
                     }
+
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    ui.label(RichText::new("ℹ️ About Rusty Gemini").strong().color(Color32::WHITE));
+                    ui.add_space(6.0);
+
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(33, 35, 39))
+                        .rounding(Rounding::same(10.0))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60)))
+                        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("✦").size(20.0).color(Color32::from_rgb(120, 190, 255)));
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("Rusty Gemini").size(14.0).color(Color32::WHITE).strong());
+                                    ui.label(RichText::new(format!("Version: v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(Color32::from_gray(170)));
+                                    ui.label(RichText::new(format!("Build Date: {}", env!("BUILD_DATE"))).size(11.0).color(Color32::from_gray(170)));
+                                });
+                            });
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Developed by Kahli (@0xKahli)").size(11.5).color(Color32::from_rgb(120, 190, 255)).strong());
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("GitHub:").size(10.5).color(Color32::from_gray(140)));
+                                ui.hyperlink_to(
+                                    RichText::new("github.com/0xKahli/gemini-rust").size(10.5).color(Color32::from_rgb(100, 180, 255)),
+                                    "https://github.com/0xKahli/gemini-rust",
+                                );
+                            });
+                        });
                 });
         }
 

@@ -23,7 +23,7 @@ fn load_app_icon() -> Option<egui::IconData> {
 
 fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Gemini Client")
+        .with_title("Rusty Gemini")
         .with_inner_size([960.0, 680.0])
         .with_min_inner_size([640.0, 440.0]);
 
@@ -37,7 +37,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Gemini Client",
+        "Rusty Gemini",
         native_options,
         Box::new(|cc| Ok(Box::new(app::GeminiApp::new(cc)))),
     )
