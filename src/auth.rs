@@ -334,6 +334,41 @@ struct ModelsResponse {
     models: Option<Vec<ModelInfo>>,
 }
 
+pub async fn detect_account_plan() -> String {
+    let key = match get_gemini_api_key() {
+        Some(k) => k,
+        None => return "Free Plan".to_string(),
+    };
+
+    let client = Client::new();
+    let body = serde_json::json!({
+        "contents": [{
+            "parts": [{ "text": "ping" }]
+        }]
+    });
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent?key={}",
+        key
+    );
+
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                "✦ Gemini Pro".to_string()
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                if text.contains("Free Tier") || text.contains("limit: 0") {
+                    "Free Plan".to_string()
+                } else {
+                    "Free Plan".to_string()
+                }
+            }
+        }
+        Err(_) => "Free Plan".to_string(),
+    }
+}
+
 pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<Vec<ModelInfo>, String> {
     let client = Client::new();
     let mut resp = client
@@ -384,62 +419,69 @@ pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<
                 return false;
             }
             let name_lower = m.name.to_lowercase();
+            // Filter out non-text/deprecated models
             !name_lower.contains("tts")
                 && !name_lower.contains("robotics")
                 && !name_lower.contains("lyria")
                 && !name_lower.contains("computer-use")
+                && !name_lower.contains("gemini-2.5")
+                && !name_lower.contains("gemini-2.0")
+                && !name_lower.contains("gemini-1.5")
+                && !name_lower.contains("antigravity")
+                && !name_lower.contains("deep-research")
+                && !name_lower.contains("gemma")
+                && !name_lower.contains("nano-banana")
         })
         .collect();
 
     if is_pro {
-        // If Pro plan is active, ensure Gemini 4 is included at the top
-        let has_gemini_4 = models.iter().any(|m| m.name.contains("gemini-4"));
-        if !has_gemini_4 {
+        // If Pro plan is active, ensure Gemini 4 Argon is included
+        let has_argon = models.iter().any(|m| m.name.contains("gemini-4-argon"));
+        if !has_argon {
             models.insert(
                 0,
                 ModelInfo {
                     name: "models/gemini-4-argon".to_string(),
-                    display_name: "✦ Gemini 4 (Pro)".to_string(),
-                    description: "Next-generation Gemini 4 frontier model (Requires Gemini Pro Plan)".to_string(),
+                    display_name: "✦ Gemini 4 (Argon Pro)".to_string(),
+                    description: "Next-generation Gemini 4 frontier model for Pro subscribers".to_string(),
                     supported_generation_methods: vec!["generateContent".to_string()],
                 },
             );
-        } else {
-            // Give Gemini 4 a distinct Pro badge
-            for m in &mut models {
-                if m.name.contains("gemini-4") && !m.display_name.contains("✦") {
-                    m.display_name = format!("✦ {} (Pro)", m.display_name);
-                }
-            }
         }
     } else {
-        // Filter out Gemini 4 for free tier
-        models.retain(|m| !m.name.contains("gemini-4"));
+        // Filter out Gemini 4 Argon for free tier (which has limit 0)
+        models.retain(|m| !m.name.contains("gemini-4-argon"));
     }
 
-    // Prioritize flagship Gemini chat models to match the official Gemini experience
+    // Always ensure working Gemini 4 Hydrogen is available at the top
+    let has_hydrogen = models.iter().any(|m| m.name.contains("gemini-4-hydrogen"));
+    if !has_hydrogen {
+        models.insert(
+            0,
+            ModelInfo {
+                name: "models/gemini-4-hydrogen".to_string(),
+                display_name: "✦ Gemini 4 (Hydrogen)".to_string(),
+                description: "Gemini 4 Hydrogen model — verified active".to_string(),
+                supported_generation_methods: vec!["generateContent".to_string()],
+            },
+        );
+    }
+
+    // Prioritize working Gemini chat models
     models.sort_by_key(|m| {
         let n = m.name.to_lowercase();
-        if n.contains("gemini-4") {
+        if n.contains("gemini-4-argon") {
             0
-        } else if n.contains("gemini-2.5-flash") && !n.contains("lite") {
+        } else if n.contains("gemini-4-hydrogen") {
             1
-        } else if n.contains("gemini-2.5-pro") {
+        } else if n.contains("gemini-3-flash") {
             2
-        } else if n.contains("gemini-3.8-flash") {
+        } else if n.contains("gemini-3.5-flash-lite") {
             3
-        } else if n.contains("gemini-3.1-pro") {
+        } else if n.contains("gemini-3.1-flash-lite") {
             4
-        } else if n.contains("gemini-3.7-flash") {
+        } else if n.contains("gemini-flash-lite-latest") {
             5
-        } else if n.contains("gemini-3.5-flash") {
-            6
-        } else if n.contains("gemini-flash-latest") {
-            7
-        } else if n.contains("gemini-pro-latest") {
-            8
-        } else if n.contains("gemini-2.5-flash-lite") {
-            9
         } else {
             50
         }

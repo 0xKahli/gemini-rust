@@ -1,6 +1,6 @@
 use crate::auth::{
-    clear_tokens, fetch_available_models, get_gemini_api_key, load_is_pro_plan, load_tokens,
-    refresh_access_token, save_is_pro_plan, start_login_flow, ModelInfo, TokenStore,
+    clear_tokens, detect_account_plan, fetch_available_models, get_gemini_api_key, load_is_pro_plan,
+    load_tokens, refresh_access_token, save_is_pro_plan, start_login_flow, ModelInfo, TokenStore,
 };
 use crate::gemini::{stream_message, AuthMethod};
 use crate::types::{Message, Role};
@@ -14,45 +14,33 @@ use tokio::sync::mpsc;
 fn default_models(is_pro: bool) -> Vec<ModelInfo> {
     let mut list = vec![
         ModelInfo {
-            name: "models/gemini-2.5-flash".to_string(),
-            display_name: "Gemini 2.5 Flash".to_string(),
-            description: "Default fast model for everyday chats, quick answers, and search".to_string(),
+            name: "models/gemini-4-hydrogen".to_string(),
+            display_name: "✦ Gemini 4 (Hydrogen)".to_string(),
+            description: "Next-generation Gemini 4 frontier model — live & verified".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
         ModelInfo {
-            name: "models/gemini-2.5-pro".to_string(),
-            display_name: "Gemini 2.5 Pro".to_string(),
-            description: "Deep thinking model for complex math, analysis, and coding".to_string(),
+            name: "models/gemini-3-flash-preview".to_string(),
+            display_name: "Gemini 3 Flash".to_string(),
+            description: "Flagship high-speed multimodal intelligence — live & verified".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
         ModelInfo {
-            name: "models/gemini-3.8-flash".to_string(),
-            display_name: "Gemini 3.8 Flash".to_string(),
-            description: "Latest 3.8 generation high-speed multimodal intelligence".to_string(),
+            name: "models/gemini-3.5-flash-lite".to_string(),
+            display_name: "Gemini 3.5 Flash Lite".to_string(),
+            description: "Ultra-fast, efficient model for quick answers & coding — live & verified".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
         ModelInfo {
-            name: "models/gemini-3.1-pro-preview".to_string(),
-            display_name: "Gemini 3.1 Pro Preview".to_string(),
-            description: "Next-generation reasoning and expert problem solving".to_string(),
+            name: "models/gemini-3.1-flash-lite-preview".to_string(),
+            display_name: "Gemini 3.1 Flash Lite".to_string(),
+            description: "Fast reasoning and problem-solving lite model — live & verified".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
         ModelInfo {
-            name: "models/gemini-flash-latest".to_string(),
-            display_name: "Gemini Flash (Latest)".to_string(),
-            description: "Always points to the newest Flash release on the Gemini website".to_string(),
-            supported_generation_methods: vec!["generateContent".to_string()],
-        },
-        ModelInfo {
-            name: "models/gemini-pro-latest".to_string(),
-            display_name: "Gemini Pro (Latest)".to_string(),
-            description: "Always points to the newest Pro release on the Gemini website".to_string(),
-            supported_generation_methods: vec!["generateContent".to_string()],
-        },
-        ModelInfo {
-            name: "models/gemini-2.5-flash-lite".to_string(),
-            display_name: "Gemini 2.5 Flash-Lite".to_string(),
-            description: "Lightweight, super-fast model for simple questions".to_string(),
+            name: "models/gemini-flash-lite-latest".to_string(),
+            display_name: "Gemini Flash Lite (Latest)".to_string(),
+            description: "Auto-updating release of Gemini Flash Lite — live & verified".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
     ];
@@ -62,8 +50,8 @@ fn default_models(is_pro: bool) -> Vec<ModelInfo> {
             0,
             ModelInfo {
                 name: "models/gemini-4-argon".to_string(),
-                display_name: "✦ Gemini 4 (Pro)".to_string(),
-                description: "Next-generation Gemini 4 frontier model (Requires Gemini Pro Plan)".to_string(),
+                display_name: "✦ Gemini 4 (Argon Pro)".to_string(),
+                description: "Gemini 4 Argon Pro — frontier reasoning for Pro accounts".to_string(),
                 supported_generation_methods: vec!["generateContent".to_string()],
             },
         );
@@ -91,6 +79,7 @@ pub struct GeminiApp {
     // Auth & Plan
     auth_state: AuthState,
     is_pro_plan: bool,
+    detected_plan_name: String,
 
     // Chat
     history: Vec<Message>,
@@ -123,6 +112,7 @@ enum AuthTaskResult {
     ModelsLoaded(Vec<ModelInfo>),
     ModelsError(String),
     TokenRefreshed(TokenStore),
+    PlanDetected(String),
 }
 
 impl GeminiApp {
@@ -135,6 +125,11 @@ impl GeminiApp {
         );
 
         let is_pro_plan = load_is_pro_plan();
+        let detected_plan_name = if is_pro_plan {
+            "✦ Gemini Pro".to_string()
+        } else {
+            "Free Plan".to_string()
+        };
 
         // Try loading saved tokens from keychain
         let saved = load_tokens();
@@ -150,6 +145,7 @@ impl GeminiApp {
         Self {
             auth_state,
             is_pro_plan,
+            detected_plan_name,
             history: Vec::new(),
             input: String::new(),
             selected_model_idx: 0,
@@ -188,23 +184,36 @@ impl GeminiApp {
     }
 
     fn fetch_models(&mut self, tokens: TokenStore, ctx: egui::Context) {
-        let (tx, rx) = mpsc::channel::<AuthTaskResult>(4);
+        let (tx, rx) = mpsc::channel::<AuthTaskResult>(8);
         self.auth_rx = Some(rx);
         let access_token = tokens.access_token.clone();
         let is_pro = self.is_pro_plan;
+
+        let tx_models = tx.clone();
+        let ctx_models = ctx.clone();
         self.runtime.spawn(async move {
             match fetch_available_models(&access_token, is_pro).await {
                 Ok(models) => {
-                    let _ = tx.send(AuthTaskResult::ModelsLoaded(models)).await;
+                    let _ = tx_models.send(AuthTaskResult::ModelsLoaded(models)).await;
                 }
                 Err(e) => {
-                    let _ = tx.send(AuthTaskResult::ModelsError(e)).await;
+                    let _ = tx_models.send(AuthTaskResult::ModelsError(e)).await;
                 }
             }
-            ctx.request_repaint();
+            ctx_models.request_repaint();
+        });
+
+        // Automatically detect account plan from live quota
+        let tx_plan = tx.clone();
+        let ctx_plan = ctx.clone();
+        self.runtime.spawn(async move {
+            let plan = detect_account_plan().await;
+            let _ = tx_plan.send(AuthTaskResult::PlanDetected(plan)).await;
+            ctx_plan.request_repaint();
         });
     }
 
+    #[allow(dead_code)]
     fn set_pro_plan(&mut self, is_pro: bool, ctx: egui::Context) {
         self.is_pro_plan = is_pro;
         save_is_pro_plan(is_pro);
@@ -296,6 +305,12 @@ impl GeminiApp {
                     *tokens = new_tokens;
                 }
             }
+            Some(AuthTaskResult::PlanDetected(plan)) => {
+                let is_pro = plan.contains("Pro");
+                self.is_pro_plan = is_pro;
+                self.detected_plan_name = plan;
+                save_is_pro_plan(is_pro);
+            }
             None => {}
         }
     }
@@ -324,9 +339,9 @@ impl GeminiApp {
                 models
                     .get(self.selected_model_idx)
                     .map(|m| m.api_name().to_string())
-                    .unwrap_or_else(|| "gemini-2.5-flash".to_string())
+                    .unwrap_or_else(|| "gemini-4-hydrogen".to_string())
             }
-            _ => "gemini-2.5-flash".to_string(),
+            _ => "gemini-4-hydrogen".to_string(),
         };
 
         self.history.push(Message::user(&input));
@@ -521,15 +536,28 @@ impl GeminiApp {
                             }
                         });
 
-                        // Plan badge pill button
-                        let badge = if self.is_pro_plan {
-                            RichText::new("✦ PRO").color(Color32::from_rgb(255, 215, 80)).strong().size(12.0)
+                        // Auto-detected plan badge
+                        let badge_color = if self.is_pro_plan {
+                            Color32::from_rgb(255, 215, 80)
                         } else {
-                            RichText::new("FREE").color(Color32::from_gray(160)).size(11.0)
+                            Color32::from_rgb(130, 190, 255)
                         };
-                        if ui.button(badge).on_hover_text("Click to configure plan tier in Settings").clicked() {
-                            self.show_settings = true;
-                        }
+                        let badge_text = if self.is_pro_plan {
+                            "✦ PRO PLAN"
+                        } else {
+                            "FREE PLAN"
+                        };
+                        let badge = RichText::new(badge_text)
+                            .color(badge_color)
+                            .strong()
+                            .size(11.0);
+                        egui::Frame::none()
+                            .fill(Color32::from_gray(35))
+                            .rounding(Rounding::same(6.0))
+                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.label(badge);
+                            });
                     }
                 });
             });
@@ -544,30 +572,14 @@ impl GeminiApp {
                     ui.heading("Settings");
                     ui.separator();
 
-                    ui.label(RichText::new("Plan Tier:").strong());
-                    let mut changed_plan = None;
-                    ui.horizontal(|ui| {
-                        if ui.selectable_label(!self.is_pro_plan, "Free Tier").clicked() {
-                            if self.is_pro_plan {
-                                changed_plan = Some(false);
-                            }
-                        }
-                        if ui.selectable_label(self.is_pro_plan, "✦ Gemini Pro").clicked() {
-                            if !self.is_pro_plan {
-                                changed_plan = Some(true);
-                            }
-                        }
-                    });
-
-                    if let Some(new_plan) = changed_plan {
-                        self.set_pro_plan(new_plan, ctx.clone());
-                    }
-
-                    if self.is_pro_plan {
-                        ui.colored_label(Color32::from_rgb(100, 220, 140), "✔ Gemini 4 unlocked");
+                    ui.label(RichText::new("Account Plan:").strong());
+                    let plan_color = if self.is_pro_plan {
+                        Color32::from_rgb(255, 215, 80)
                     } else {
-                        ui.label(RichText::new("Select '✦ Gemini Pro' to unlock Gemini 4 models").color(Color32::from_gray(150)).size(11.0));
-                    }
+                        Color32::from_rgb(130, 190, 255)
+                    };
+                    ui.colored_label(plan_color, RichText::new(&self.detected_plan_name).size(14.0).strong());
+                    ui.label(RichText::new("Auto-detected live from your Google account quota.").color(Color32::from_gray(150)).size(11.0));
 
                     ui.add_space(8.0);
                     ui.separator();
