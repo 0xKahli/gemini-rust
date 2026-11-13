@@ -250,17 +250,11 @@ impl GeminiApp {
 
     pub fn close_tab(&mut self, id: u64) {
         if self.tabs.len() <= 1 {
-            // Keep at least one tab open; reset it to fresh state
-            if let Some(tab) = self.tabs.first_mut() {
-                tab.title = "New chat".to_string();
-                tab.history.clear();
-                tab.input.clear();
-                tab.is_streaming = false;
-                tab.pending_response.clear();
-                tab.copied_idx = None;
-                tab.chat_rx = None;
-                tab.scroll_to_bottom = true;
-            }
+            // Keep at least one tab open; reset it to a fresh new conversation tab
+            let new_id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs = vec![ConversationTab::new(new_id)];
+            self.active_tab_id = new_id;
             return;
         }
 
@@ -1012,99 +1006,157 @@ impl GeminiApp {
                                         )
                                     };
 
-                                    let tab_frame = egui::Frame::none()
-                                        .fill(bg_color)
-                                        .rounding(Rounding {
+                                    let tab_w = 160.0_f32;
+                                    let tab_h = 32.0_f32;
+                                    let (tab_rect, tab_resp) = ui.allocate_exact_size(
+                                        egui::vec2(tab_w, tab_h),
+                                        egui::Sense::click(),
+                                    );
+
+                                    // Paint tab background & outline
+                                    let tab_bg = if tab_resp.hovered() && !is_active {
+                                        Color32::from_rgb(30, 32, 36)
+                                    } else {
+                                        bg_color
+                                    };
+
+                                    ui.painter().rect_filled(
+                                        tab_rect,
+                                        Rounding {
                                             nw: 8.0,
                                             ne: 8.0,
                                             sw: 0.0,
                                             se: 0.0,
-                                        })
-                                        .stroke(stroke_color)
-                                        .inner_margin(egui::Margin::symmetric(10.0, 6.0));
+                                        },
+                                        tab_bg,
+                                    );
+                                    ui.painter().rect_stroke(
+                                        tab_rect,
+                                        Rounding {
+                                            nw: 8.0,
+                                            ne: 8.0,
+                                            sw: 0.0,
+                                            se: 0.0,
+                                        },
+                                        stroke_color,
+                                    );
 
-                                    let tab_resp = tab_frame.show(ui, |ui| {
-                                        ui.set_width(160.0);
-                                        ui.horizontal(|ui| {
-                                            // Left: Tab Icon or Live Spinner
-                                            if tab.is_streaming {
-                                                ui.add(egui::Spinner::new().size(13.0));
-                                            } else {
-                                                ui.label(RichText::new("💬").size(12.0));
+                                    // Active tab bottom blue highlight line
+                                    if is_active {
+                                        let bottom_line = egui::Rect::from_min_max(
+                                            egui::pos2(tab_rect.left() + 2.0, tab_rect.bottom() - 2.5),
+                                            egui::pos2(tab_rect.right() - 2.0, tab_rect.bottom()),
+                                        );
+                                        ui.painter().rect_filled(
+                                            bottom_line,
+                                            Rounding::ZERO,
+                                            Color32::from_rgb(66, 133, 244),
+                                        );
+                                    }
+
+                                    // Left: Tab Icon (Chat bubble or spinner)
+                                    let icon_center = egui::pos2(tab_rect.left() + 15.0, tab_rect.center().y);
+                                    if tab.is_streaming {
+                                        ui.painter().text(
+                                            icon_center,
+                                            egui::Align2::CENTER_CENTER,
+                                            "⏳",
+                                            egui::FontId::proportional(12.0),
+                                            Color32::from_rgb(120, 190, 255),
+                                        );
+                                    } else {
+                                        ui.painter().text(
+                                            icon_center,
+                                            egui::Align2::CENTER_CENTER,
+                                            "💬",
+                                            egui::FontId::proportional(12.0),
+                                            Color32::WHITE,
+                                        );
+                                    }
+
+                                    // Right: Tab Close Icon Button (Exact 18x18 circle)
+                                    let close_rect = egui::Rect::from_center_size(
+                                        egui::pos2(tab_rect.right() - 15.0, tab_rect.center().y),
+                                        egui::vec2(18.0, 18.0),
+                                    );
+                                    let close_id = ui.make_persistent_id(("close_btn", tab.id));
+                                    let close_resp = ui.interact(close_rect, close_id, egui::Sense::click());
+
+                                    let is_close_hovered = close_resp.hovered();
+                                    let close_bg = if is_close_hovered {
+                                        Color32::from_rgb(215, 60, 60) // High-visibility red on hover like browsers!
+                                    } else if is_active {
+                                        Color32::from_rgb(46, 48, 55)
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    };
+
+                                    ui.painter().rect_filled(close_rect, Rounding::same(9.0), close_bg);
+
+                                    let close_color = if is_close_hovered {
+                                        Color32::WHITE
+                                    } else if is_active {
+                                        Color32::from_gray(210)
+                                    } else {
+                                        Color32::from_gray(140)
+                                    };
+
+                                    ui.painter().text(
+                                        close_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "✕",
+                                        egui::FontId::proportional(11.0),
+                                        close_color,
+                                    );
+
+                                    let is_close_clicked = close_resp.clicked();
+                                    close_resp.on_hover_text("Close tab (Ctrl+W)");
+
+                                    // Center: Tab Title Label (strictly bounded between icon and close button)
+                                    let title_str = if tab.title.trim().is_empty() {
+                                        "New chat"
+                                    } else {
+                                        &tab.title
+                                    };
+
+                                    let title_x = tab_rect.left() + 28.0;
+                                    let max_title_w = (close_rect.left() - 4.0) - title_x;
+
+                                    let font_id = egui::FontId::proportional(12.5);
+                                    let mut truncated_title = title_str.to_string();
+                                    let galley = ui.painter().layout_no_wrap(truncated_title.clone(), font_id.clone(), text_color);
+                                    if galley.size().x > max_title_w {
+                                        let chars: Vec<char> = title_str.chars().collect();
+                                        for len in (1..chars.len()).rev() {
+                                            let candidate: String = chars[..len].iter().collect();
+                                            let cand_str = format!("{}…", candidate);
+                                            let cand_g = ui.painter().layout_no_wrap(cand_str.clone(), font_id.clone(), text_color);
+                                            if cand_g.size().x <= max_title_w {
+                                                truncated_title = cand_str;
+                                                break;
                                             }
-                                            ui.add_space(2.0);
+                                        }
+                                    }
 
-                                            // Center: Tab Title Label (takes remaining space minus close button)
-                                            let title_str = if tab.title.trim().is_empty() {
-                                                "New chat"
-                                            } else {
-                                                &tab.title
-                                            };
-                                            let title_w = (ui.available_width() - 24.0).max(40.0);
+                                    ui.painter().text(
+                                        egui::pos2(title_x, tab_rect.center().y),
+                                        egui::Align2::LEFT_CENTER,
+                                        truncated_title,
+                                        font_id,
+                                        text_color,
+                                    );
 
-                                            let title_resp = ui.add_sized(
-                                                egui::vec2(title_w, 20.0),
-                                                egui::Label::new(
-                                                    RichText::new(title_str)
-                                                        .size(12.5)
-                                                        .color(text_color)
-                                                        .strong(),
-                                                )
-                                                .truncate()
-                                                .sense(egui::Sense::click()),
-                                            );
-
-                                            if title_resp.clicked() {
-                                                switch_to_tab = Some(tab.id);
-                                            }
-
-                                            // Right: Dedicated Tab Closing Icon Button (18x18 circle)
-                                            let (close_rect, close_resp) = ui.allocate_exact_size(
-                                                egui::vec2(18.0, 18.0),
-                                                egui::Sense::click(),
-                                            );
-
-                                            let is_close_hovered = close_resp.hovered();
-                                            let close_bg = if is_close_hovered {
-                                                Color32::from_rgb(62, 65, 74)
-                                            } else {
-                                                Color32::TRANSPARENT
-                                            };
-
-                                            ui.painter().rect_filled(close_rect, Rounding::same(9.0), close_bg);
-
-                                            let close_color = if is_close_hovered {
-                                                Color32::WHITE
-                                            } else if is_active {
-                                                Color32::from_gray(195)
-                                            } else {
-                                                Color32::from_gray(135)
-                                            };
-
-                                            ui.painter().text(
-                                                close_rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "✕",
-                                                egui::FontId::proportional(11.0),
-                                                close_color,
-                                            );
-
-                                            if close_resp.clicked() {
-                                                close_tab_id = Some(tab.id);
-                                            }
-                                            close_resp.on_hover_text("Close tab (Ctrl+W)");
-                                        });
-                                    });
-
-                                    // Switch tab if clicked on tab background and close was not clicked
-                                    if tab_resp.response.interact(egui::Sense::click()).clicked() && close_tab_id.is_none() {
+                                    // Click handling: Close button has strict precedence over tab switch
+                                    if is_close_clicked {
+                                        close_tab_id = Some(tab.id);
+                                    } else if tab_resp.clicked() {
                                         switch_to_tab = Some(tab.id);
                                     }
                                 }
 
                                 // ➕ Add new tab button (Chrome-style circular button)
                                 let (add_rect, add_resp) = ui.allocate_exact_size(
-                                    egui::vec2(26.0, 26.0),
+                                    egui::vec2(28.0, 28.0),
                                     egui::Sense::click(),
                                 );
 
@@ -1115,28 +1167,30 @@ impl GeminiApp {
                                     Color32::from_rgb(30, 32, 36)
                                 };
 
-                                ui.painter().rect_filled(add_rect, Rounding::same(13.0), add_bg);
+                                ui.painter().rect_filled(add_rect, Rounding::same(14.0), add_bg);
                                 ui.painter().text(
                                     add_rect.center(),
                                     egui::Align2::CENTER_CENTER,
                                     "+",
-                                    egui::FontId::proportional(15.0),
+                                    egui::FontId::proportional(16.0),
                                     if is_add_hovered { Color32::WHITE } else { Color32::from_gray(210) },
                                 );
 
                                 if add_resp.clicked() {
                                     self.add_new_tab();
+                                    ui.ctx().request_repaint();
                                 }
                                 add_resp.on_hover_text("New tab (Ctrl+T)");
                             });
                         });
                 });
 
-                if let Some(id) = switch_to_tab {
-                    self.active_tab_id = id;
-                }
                 if let Some(id) = close_tab_id {
                     self.close_tab(id);
+                    ui.ctx().request_repaint();
+                } else if let Some(id) = switch_to_tab {
+                    self.active_tab_id = id;
+                    ui.ctx().request_repaint();
                 }
             });
 
