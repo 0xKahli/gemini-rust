@@ -114,12 +114,18 @@ pub fn save_conversations(conversations: &[StoredConversation]) {
     let path = conversations_path();
     if let Ok(json) = serde_json::to_string_pretty(conversations) {
         let temp_path = path.with_extension("json.tmp");
-        if std::fs::write(&temp_path, json).is_ok() {
-            let _ = std::fs::rename(temp_path, &path);
+        if std::fs::write(&temp_path, &json).is_ok() {
+            if std::fs::rename(&temp_path, &path).is_err() {
+                let _ = std::fs::write(&path, &json);
+                let _ = std::fs::remove_file(&temp_path);
+            }
+        } else {
+            let _ = std::fs::write(&path, &json);
         }
     }
 }
 
+#[allow(dead_code)]
 pub fn upsert_conversation(conv: StoredConversation) {
     let mut convs = load_conversations();
     if let Some(pos) = convs.iter().position(|c| c.id == conv.id) {
@@ -131,6 +137,7 @@ pub fn upsert_conversation(conv: StoredConversation) {
     save_conversations(&convs);
 }
 
+#[allow(dead_code)]
 pub fn delete_conversation(id: &str) {
     let mut convs = load_conversations();
     convs.retain(|c| c.id != id);
@@ -145,8 +152,13 @@ pub fn save_session(session: &SavedSessionState) {
     let path = session_path();
     if let Ok(json) = serde_json::to_string_pretty(session) {
         let temp_path = path.with_extension("json.tmp");
-        if std::fs::write(&temp_path, json).is_ok() {
-            let _ = std::fs::rename(temp_path, &path);
+        if std::fs::write(&temp_path, &json).is_ok() {
+            if std::fs::rename(&temp_path, &path).is_err() {
+                let _ = std::fs::write(&path, &json);
+                let _ = std::fs::remove_file(&temp_path);
+            }
+        } else {
+            let _ = std::fs::write(&path, &json);
         }
     }
 }

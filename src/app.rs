@@ -4,8 +4,8 @@ use crate::auth::{
 };
 use crate::gemini::{stream_message, AuthMethod};
 use crate::storage::{
-    clear_all_conversations, delete_conversation, load_conversations, load_session,
-    save_session, upsert_conversation, SavedSessionState, SavedTabState, StoredConversation,
+    load_conversations, load_session, save_session, SavedSessionState, SavedTabState,
+    StoredConversation,
 };
 use crate::types::{Message, Role};
 use egui::{Color32, RichText, Rounding, Stroke, Vec2};
@@ -18,8 +18,11 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 
     #[cfg(windows)]
     {
+        let win_dir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let fonts_dir = std::path::PathBuf::from(win_dir).join("Fonts");
+
         // 1. Segoe UI (Clean modern Windows typography)
-        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
+        if let Ok(bytes) = std::fs::read(fonts_dir.join("segoeui.ttf")) {
             fonts.font_data.insert(
                 "segoe_ui".to_owned(),
                 Arc::new(egui::FontData::from_owned(bytes)),
@@ -30,7 +33,7 @@ fn setup_custom_fonts(ctx: &egui::Context) {
         }
 
         // 2. Segoe UI Symbol (High-compatibility symbols, math, arrows, UI shapes)
-        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\seguisym.ttf") {
+        if let Ok(bytes) = std::fs::read(fonts_dir.join("seguisym.ttf")) {
             fonts.font_data.insert(
                 "segoe_symbol".to_owned(),
                 Arc::new(egui::FontData::from_owned(bytes)),
@@ -44,7 +47,7 @@ fn setup_custom_fonts(ctx: &egui::Context) {
         }
 
         // 3. Segoe UI Emoji (Complete emoji coverage: 💬, ➕, ✨, 🚀, 🧠, 🤖, 🚪, etc.)
-        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\seguiemj.ttf") {
+        if let Ok(bytes) = std::fs::read(fonts_dir.join("seguiemj.ttf")) {
             fonts.font_data.insert(
                 "segoe_emoji".to_owned(),
                 Arc::new(egui::FontData::from_owned(bytes)),
@@ -311,6 +314,16 @@ impl GeminiApp {
     }
 
     pub fn close_tab(&mut self, id: u64) {
+        // If the tab was actively streaming, flush the partial response into history so it's not lost
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+            if tab.is_streaming && !tab.pending_response.is_empty() {
+                tab.history.push(Message::model(tab.pending_response.clone()));
+                tab.pending_response.clear();
+                tab.is_streaming = false;
+                tab.chat_rx = None;
+            }
+        }
+
         self.save_tab_conversation(id);
 
         if self.tabs.len() <= 1 {
@@ -374,13 +387,15 @@ impl GeminiApp {
                     tab.history.clone(),
                     model_name,
                 );
-                let existing = load_conversations();
-                if let Some(ex) = existing.iter().find(|c| c.id == tab.conv_id) {
-                    conv.created_at = ex.created_at;
+                // Update in memory directly without redundant triple disk re-reads
+                if let Some(pos) = self.stored_conversations.iter().position(|c| c.id == tab.conv_id) {
+                    conv.created_at = self.stored_conversations[pos].created_at;
+                    self.stored_conversations[pos] = conv;
+                } else {
+                    self.stored_conversations.insert(0, conv);
                 }
-                conv.updated_at = chrono::Local::now().timestamp();
-                upsert_conversation(conv);
-                self.stored_conversations = load_conversations();
+                self.stored_conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                crate::storage::save_conversations(&self.stored_conversations);
             }
         }
         self.persist_session();
@@ -427,16 +442,16 @@ impl GeminiApp {
     }
 
     pub fn delete_stored_conversation(&mut self, conv_id: &str) {
-        delete_conversation(conv_id);
-        self.stored_conversations = load_conversations();
+        self.stored_conversations.retain(|c| c.id != conv_id);
+        crate::storage::save_conversations(&self.stored_conversations);
         if self.confirm_delete_id.as_deref() == Some(conv_id) {
             self.confirm_delete_id = None;
         }
     }
 
     pub fn clear_all_stored_history(&mut self) {
-        clear_all_conversations();
-        self.stored_conversations = Vec::new();
+        self.stored_conversations.clear();
+        crate::storage::clear_all_conversations();
         self.confirm_delete_id = None;
     }
 
@@ -1365,17 +1380,26 @@ impl GeminiApp {
                                     let font_id = egui::FontId::proportional(12.5);
                                     let mut truncated_title = title_str.to_string();
                                     let galley = ui.painter().layout_no_wrap(truncated_title.clone(), font_id.clone(), text_color);
-                                    if galley.size().x > max_title_w {
+                                    if galley.size().x > max_title_w && max_title_w > 10.0 {
                                         let chars: Vec<char> = title_str.chars().collect();
-                                        for len in (1..chars.len()).rev() {
-                                            let candidate: String = chars[..len].iter().collect();
+                                        let mut low = 1;
+                                        let mut high = chars.len();
+                                        let mut best = 1;
+                                        while low <= high {
+                                            let mid = (low + high) / 2;
+                                            let candidate: String = chars[..mid].iter().collect();
                                             let cand_str = format!("{}…", candidate);
-                                            let cand_g = ui.painter().layout_no_wrap(cand_str.clone(), font_id.clone(), text_color);
+                                            let cand_g = ui.painter().layout_no_wrap(cand_str, font_id.clone(), text_color);
                                             if cand_g.size().x <= max_title_w {
-                                                truncated_title = cand_str;
-                                                break;
+                                                best = mid;
+                                                low = mid + 1;
+                                            } else {
+                                                if mid == 0 { break; }
+                                                high = mid - 1;
                                             }
                                         }
+                                        let candidate: String = chars[..best].iter().collect();
+                                        truncated_title = format!("{}…", candidate);
                                     }
 
                                     ui.painter().text(
@@ -1601,7 +1625,7 @@ impl GeminiApp {
                     ui.add_space(4.0);
 
                     let search_q = self.history_search.trim().to_lowercase();
-                    let matching_convs: Vec<StoredConversation> = self
+                    let matching_convs: Vec<&StoredConversation> = self
                         .stored_conversations
                         .iter()
                         .filter(|c| {
@@ -1612,7 +1636,6 @@ impl GeminiApp {
                                     || c.history.iter().any(|m| m.content.to_lowercase().contains(&search_q))
                             }
                         })
-                        .cloned()
                         .collect();
 
                     if matching_convs.is_empty() {
@@ -1705,9 +1728,9 @@ impl GeminiApp {
                                     });
 
                                     if delete_clicked {
-                                        delete_stored_id = Some(conv.id);
+                                        delete_stored_id = Some(conv.id.clone());
                                     } else if frame_resp.response.interact(egui::Sense::click()).clicked() {
-                                        open_stored_id = Some(conv.id);
+                                        open_stored_id = Some(conv.id.clone());
                                     }
 
                                     ui.add_space(6.0);

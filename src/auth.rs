@@ -189,6 +189,8 @@ pub fn load_tokens() -> Option<TokenStore> {
 pub fn clear_tokens() {
     let path = get_config_dir().join("auth.json");
     let _ = std::fs::remove_file(&path);
+    let avatar = get_config_dir().join("avatar.png");
+    let _ = std::fs::remove_file(&avatar);
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
         let _ = entry.delete_credential();
     }
@@ -327,40 +329,88 @@ pub async fn start_login_flow() -> Result<TokenStore, String> {
 
 fn wait_for_redirect_code(csrf_token: CsrfToken) -> Result<String, String> {
     let server = tiny_http::Server::http(format!("127.0.0.1:{}", REDIRECT_PORT))
-        .map_err(|e| format!("Failed to start redirect server: {}", e))?;
+        .map_err(|e| format!("Failed to start redirect server on port {}: {}", REDIRECT_PORT, e))?;
 
-    // Wait for one request (the redirect from Google)
-    let request = server
-        .recv()
-        .map_err(|e| format!("Server recv error: {}", e))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
 
-    let url_str = format!("http://localhost{}", request.url());
-    let parsed = url::Url::parse(&url_str).map_err(|e| format!("URL parse: {}", e))?;
+    while std::time::Instant::now() < deadline {
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        let request = match server.recv_timeout(timeout.min(std::time::Duration::from_secs(2))) {
+            Ok(Some(req)) => req,
+            Ok(None) => continue, // Timeout slice elapsed, keep waiting until deadline
+            Err(e) => return Err(format!("Server error while waiting for redirect: {}", e)),
+        };
 
-    let mut code = None;
-    let mut state = None;
+        let raw_url = request.url();
+        if raw_url.starts_with("/favicon.ico") {
+            let resp = tiny_http::Response::empty(404);
+            let _ = request.respond(resp);
+            continue;
+        }
 
-    for (key, val) in parsed.query_pairs() {
-        match key.as_ref() {
-            "code" => code = Some(val.into_owned()),
-            "state" => state = Some(val.into_owned()),
-            _ => {}
+        let url_str = format!("http://localhost{}", raw_url);
+        let parsed = match url::Url::parse(&url_str) {
+            Ok(u) => u,
+            Err(_) => {
+                let resp = tiny_http::Response::from_string("Invalid request").with_status_code(400);
+                let _ = request.respond(resp);
+                continue;
+            }
+        };
+
+        let mut code = None;
+        let mut state = None;
+        let mut error = None;
+
+        for (key, val) in parsed.query_pairs() {
+            match key.as_ref() {
+                "code" => code = Some(val.into_owned()),
+                "state" => state = Some(val.into_owned()),
+                "error" => error = Some(val.into_owned()),
+                _ => {}
+            }
+        }
+
+        if let Some(err) = error {
+            let html = format!(
+                "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
+                <h2>❌ Sign-in Error</h2><p>Google authentication returned: {}</p>\
+                </body></html>",
+                err
+            );
+            let response = tiny_http::Response::from_string(html)
+                .with_status_code(400)
+                .with_header("Content-Type: text/html".parse::<tiny_http::Header>().unwrap());
+            let _ = request.respond(response);
+            return Err(format!("Authentication canceled or denied: {}", err));
+        }
+
+        if state.as_deref() != Some(csrf_token.secret()) {
+            let html = "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
+                <h2>❌ Security Verification Failed</h2><p>CSRF state token mismatch. Please try signing in again.</p>\
+                </body></html>";
+            let response = tiny_http::Response::from_string(html)
+                .with_status_code(403)
+                .with_header("Content-Type: text/html".parse::<tiny_http::Header>().unwrap());
+            let _ = request.respond(response);
+            return Err("Security verification failed: CSRF token mismatch".to_string());
+        }
+
+        if let Some(auth_code) = code {
+            let html = "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
+                <h2>✅ Signed in!</h2><p>You can close this tab and return to Gemini Client.</p>\
+                </body></html>";
+            let response = tiny_http::Response::from_string(html)
+                .with_header("Content-Type: text/html".parse::<tiny_http::Header>().unwrap());
+            let _ = request.respond(response);
+            return Ok(auth_code);
+        } else {
+            let resp = tiny_http::Response::from_string("Missing authorization code").with_status_code(400);
+            let _ = request.respond(resp);
         }
     }
 
-    // Respond to browser
-    let html = "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
-        <h2>✅ Signed in!</h2><p>You can close this tab and return to Gemini Client.</p>\
-        </body></html>";
-    let response = tiny_http::Response::from_string(html)
-        .with_header("Content-Type: text/html".parse::<tiny_http::Header>().unwrap());
-    let _ = request.respond(response);
-
-    if state.as_deref() != Some(csrf_token.secret()) {
-        return Err("CSRF token mismatch".to_string());
-    }
-
-    code.ok_or_else(|| "No code in redirect".to_string())
+    Err("Sign-in timed out after 2 minutes. Please try again.".to_string())
 }
 
 #[derive(Deserialize)]
@@ -436,12 +486,9 @@ pub async fn detect_account_plan() -> String {
         }]
     });
 
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent?key={}",
-        key
-    );
+    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent";
 
-    match client.post(&url).json(&body).send().await {
+    match client.post(url).header("x-goog-api-key", &key).json(&body).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 "✦ Google AI Pro".to_string()
@@ -470,7 +517,8 @@ pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<
     if need_fallback {
         if let Some(key) = get_gemini_api_key() {
             if let Ok(api_resp) = client
-                .get(format!("https://generativelanguage.googleapis.com/v1beta/models?key={}", key))
+                .get("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", &key)
                 .send()
                 .await
             {
