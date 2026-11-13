@@ -89,7 +89,7 @@ pub async fn stream_message(
         let text = response.text().await.unwrap_or_default();
         if text.contains("limit: 0") && model.contains("gemini-4") {
             let _ = tx
-                .send("[🔒 Gemini 4 requires an active Gemini Pro / Advanced subscription. Free tier accounts have 0 quota for Gemini 4. Please select Gemini 2.5 Pro or Gemini 2.5 Flash from the top dropdown, or enable Pro in Settings.]".to_string())
+                .send("[🔒 This model requires an active Gemini Pro / Advanced subscription. Free tier accounts have 0 quota for this model. Please select Gemini 4 (Hydrogen) or Gemini 3 Flash from the model selector.]".to_string())
                 .await;
         } else {
             let _ = tx.send(format!("[API Error {}: {}]", status, text)).await;
