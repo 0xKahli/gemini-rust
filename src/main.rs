@@ -3,6 +3,7 @@
 mod app;
 mod auth;
 mod gemini;
+mod storage;
 mod types;
 
 fn main() -> eframe::Result<()> {

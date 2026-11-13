@@ -3,6 +3,10 @@ use crate::auth::{
     load_tokens, refresh_access_token, save_is_pro_plan, start_login_flow, ModelInfo, TokenStore,
 };
 use crate::gemini::{stream_message, AuthMethod};
+use crate::storage::{
+    clear_all_conversations, delete_conversation, load_conversations, load_session,
+    save_session, upsert_conversation, SavedSessionState, SavedTabState, StoredConversation,
+};
 use crate::types::{Message, Role};
 use egui::{Color32, RichText, Rounding, Stroke, Vec2};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -121,6 +125,7 @@ fn default_models(is_pro: bool) -> Vec<ModelInfo> {
 
 pub struct ConversationTab {
     pub id: u64,
+    pub conv_id: String,
     pub title: String,
     pub history: Vec<Message>,
     pub input: String,
@@ -134,10 +139,32 @@ pub struct ConversationTab {
 
 impl ConversationTab {
     pub fn new(id: u64) -> Self {
+        let conv_id = format!(
+            "conv_{}_{}",
+            chrono::Local::now().timestamp_millis(),
+            id
+        );
         Self {
             id,
+            conv_id,
             title: "New chat".to_string(),
             history: Vec::new(),
+            input: String::new(),
+            is_streaming: false,
+            pending_response: String::new(),
+            copied_idx: None,
+            scroll_to_bottom: true,
+            chat_rx: None,
+            markdown_cache: CommonMarkCache::default(),
+        }
+    }
+
+    pub fn with_conversation(id: u64, conv_id: String, title: String, history: Vec<Message>) -> Self {
+        Self {
+            id,
+            conv_id,
+            title,
+            history,
             input: String::new(),
             is_streaming: false,
             pending_response: String::new(),
@@ -176,6 +203,12 @@ pub struct GeminiApp {
     selected_model_idx: usize,
     system_prompt: String,
     show_settings: bool,
+
+    // Stored Conversations & History Sidebar
+    show_history_sidebar: bool,
+    history_search: String,
+    stored_conversations: Vec<StoredConversation>,
+    confirm_delete_id: Option<String>,
 
     // Runtime & async channels
     runtime: Arc<tokio::runtime::Runtime>,
@@ -220,19 +253,45 @@ impl GeminiApp {
             None => AuthState::LoggedOut,
         };
 
-        let initial_tab = ConversationTab::new(1);
+        let stored_conversations = load_conversations();
+
+        // Restore tabs from previous session if available
+        let (tabs, active_tab_id, next_tab_id) = if let Some(session) = load_session() {
+            let restored: Vec<ConversationTab> = session
+                .tabs
+                .into_iter()
+                .map(|t| ConversationTab::with_conversation(t.id, t.conv_id, t.title, t.history))
+                .collect();
+            if !restored.is_empty() {
+                let active = if restored.iter().any(|t| t.id == session.active_tab_id) {
+                    session.active_tab_id
+                } else {
+                    restored[0].id
+                };
+                let next_id = session.next_tab_id.max(restored.iter().map(|t| t.id).max().unwrap_or(1) + 1);
+                (restored, active, next_id)
+            } else {
+                (vec![ConversationTab::new(1)], 1, 2)
+            }
+        } else {
+            (vec![ConversationTab::new(1)], 1, 2)
+        };
 
         Self {
             auth_state,
             is_pro_plan,
             detected_plan_name,
             avatar_texture: None,
-            tabs: vec![initial_tab],
-            active_tab_id: 1,
-            next_tab_id: 2,
+            tabs,
+            active_tab_id,
+            next_tab_id,
             selected_model_idx: 0,
             system_prompt: String::new(),
             show_settings: false,
+            show_history_sidebar: true,
+            history_search: String::new(),
+            stored_conversations,
+            confirm_delete_id: None,
             runtime,
             auth_rx: None,
         }
@@ -245,16 +304,20 @@ impl GeminiApp {
         self.next_tab_id += 1;
         self.tabs.push(ConversationTab::new(id));
         self.active_tab_id = id;
+        self.persist_session();
         id
     }
 
     pub fn close_tab(&mut self, id: u64) {
+        self.save_tab_conversation(id);
+
         if self.tabs.len() <= 1 {
             // Keep at least one tab open; reset it to a fresh new conversation tab
             let new_id = self.next_tab_id;
             self.next_tab_id += 1;
             self.tabs = vec![ConversationTab::new(new_id)];
             self.active_tab_id = new_id;
+            self.persist_session();
             return;
         }
 
@@ -269,6 +332,110 @@ impl GeminiApp {
                 self.active_tab_id = self.tabs[new_idx].id;
             }
         }
+        self.persist_session();
+    }
+
+    // ── Storage & Previous Conversations ──────────────────────────────────────
+
+    pub fn persist_session(&self) {
+        let saved_tabs: Vec<SavedTabState> = self
+            .tabs
+            .iter()
+            .map(|t| SavedTabState {
+                id: t.id,
+                conv_id: t.conv_id.clone(),
+                title: t.title.clone(),
+                history: t.history.clone(),
+            })
+            .collect();
+        let session = SavedSessionState {
+            tabs: saved_tabs,
+            active_tab_id: self.active_tab_id,
+            next_tab_id: self.next_tab_id,
+            selected_model_idx: self.selected_model_idx,
+        };
+        save_session(&session);
+    }
+
+    pub fn save_tab_conversation(&mut self, tab_id: u64) {
+        if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
+            if !tab.history.is_empty() {
+                let model_name = match &self.auth_state {
+                    AuthState::LoggedIn { models, .. } => models
+                        .get(self.selected_model_idx)
+                        .map(|m| m.api_name().to_string()),
+                    _ => None,
+                };
+                let mut conv = StoredConversation::new(
+                    tab.conv_id.clone(),
+                    tab.title.clone(),
+                    tab.history.clone(),
+                    model_name,
+                );
+                let existing = load_conversations();
+                if let Some(ex) = existing.iter().find(|c| c.id == tab.conv_id) {
+                    conv.created_at = ex.created_at;
+                }
+                conv.updated_at = chrono::Local::now().timestamp();
+                upsert_conversation(conv);
+                self.stored_conversations = load_conversations();
+            }
+        }
+        self.persist_session();
+    }
+
+    pub fn open_stored_conversation(&mut self, conv_id: &str) {
+        // 1. If already open in an existing tab, switch to it
+        if let Some(tab) = self.tabs.iter().find(|t| t.conv_id == conv_id) {
+            self.active_tab_id = tab.id;
+            return;
+        }
+
+        // 2. Find the stored conversation data
+        let conv_opt = self.stored_conversations.iter().find(|c| c.id == conv_id).cloned();
+        let conv = match conv_opt {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 3. If the active tab is empty and not streaming, load directly into it
+        if let Some(active_tab) = self.active_tab_mut() {
+            if active_tab.history.is_empty() && !active_tab.is_streaming {
+                active_tab.conv_id = conv.id.clone();
+                active_tab.title = conv.title.clone();
+                active_tab.history = conv.history.clone();
+                active_tab.scroll_to_bottom = true;
+                self.persist_session();
+                return;
+            }
+        }
+
+        // 4. Otherwise, open a new tab with this conversation
+        let new_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let new_tab = ConversationTab::with_conversation(
+            new_id,
+            conv.id.clone(),
+            conv.title.clone(),
+            conv.history.clone(),
+        );
+        self.tabs.push(new_tab);
+        self.active_tab_id = new_id;
+        self.persist_session();
+    }
+
+    pub fn delete_stored_conversation(&mut self, conv_id: &str) {
+        delete_conversation(conv_id);
+        self.stored_conversations = load_conversations();
+        if self.confirm_delete_id.as_deref() == Some(conv_id) {
+            self.confirm_delete_id = None;
+        }
+    }
+
+    pub fn clear_all_stored_history(&mut self) {
+        clear_all_conversations();
+        self.stored_conversations = Vec::new();
+        self.confirm_delete_id = None;
     }
 
     pub fn next_tab(&mut self) {
@@ -503,28 +670,6 @@ impl GeminiApp {
     // ── Chat & Background Streaming Helpers ────────────────────────────────────
 
     fn send_message(&mut self, ctx: egui::Context) {
-        let tab = match self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
-            Some(t) => t,
-            None => return,
-        };
-
-        let input = tab.input.trim().to_string();
-        if input.is_empty() || tab.is_streaming {
-            return;
-        }
-
-        // Auto-update tab title if this is the first message or "New chat"
-        if tab.title == "New chat" || tab.title.is_empty() {
-            let first_line = input.lines().next().unwrap_or("Chat").trim();
-            let chars: Vec<char> = first_line.chars().collect();
-            tab.title = if chars.len() > 20 {
-                let s: String = chars[..18].iter().collect();
-                format!("{}…", s)
-            } else {
-                first_line.to_string()
-            };
-        }
-
         let auth = if let Some(key) = get_gemini_api_key() {
             AuthMethod::ApiKey(key)
         } else {
@@ -546,32 +691,61 @@ impl GeminiApp {
             _ => "gemini-4-hydrogen".to_string(),
         };
 
-        tab.history.push(Message::user(&input));
-        tab.input.clear();
-        tab.is_streaming = true;
-        tab.pending_response.clear();
-        tab.scroll_to_bottom = true;
+        let send_bundle = {
+            let tab = match self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
+                Some(t) => t,
+                None => return,
+            };
 
-        let (tx, rx) = mpsc::channel::<String>(256);
-        tab.chat_rx = Some(rx);
+            let input = tab.input.trim().to_string();
+            if input.is_empty() || tab.is_streaming {
+                return;
+            }
 
-        let mut history_to_send = tab.history.clone();
-        if !self.system_prompt.is_empty() && history_to_send.len() == 1 {
-            history_to_send.insert(
-                0,
-                Message {
-                    role: Role::User,
-                    content: format!("System instructions: {}\n\nAcknowledge briefly.", self.system_prompt),
-                },
-            );
-            history_to_send.insert(
-                1,
-                Message {
-                    role: Role::Model,
-                    content: "Understood.".to_string(),
-                },
-            );
-        }
+            // Auto-update tab title if this is the first message or "New chat"
+            if tab.title == "New chat" || tab.title.is_empty() {
+                let first_line = input.lines().next().unwrap_or("Chat").trim();
+                let chars: Vec<char> = first_line.chars().collect();
+                tab.title = if chars.len() > 20 {
+                    let s: String = chars[..18].iter().collect();
+                    format!("{}…", s)
+                } else {
+                    first_line.to_string()
+                };
+            }
+
+            tab.history.push(Message::user(&input));
+            tab.input.clear();
+            tab.is_streaming = true;
+            tab.pending_response.clear();
+            tab.scroll_to_bottom = true;
+
+            let (tx, rx) = mpsc::channel::<String>(256);
+            tab.chat_rx = Some(rx);
+
+            let mut history_to_send = tab.history.clone();
+            if !self.system_prompt.is_empty() && history_to_send.len() == 1 {
+                history_to_send.insert(
+                    0,
+                    Message {
+                        role: Role::User,
+                        content: format!("System instructions: {}\n\nAcknowledge briefly.", self.system_prompt),
+                    },
+                );
+                history_to_send.insert(
+                    1,
+                    Message {
+                        role: Role::Model,
+                        content: "Understood.".to_string(),
+                    },
+                );
+            }
+
+            (tab.id, history_to_send, tx)
+        };
+
+        let (tab_id, history_to_send, tx) = send_bundle;
+        self.save_tab_conversation(tab_id);
 
         self.runtime.spawn(async move {
             stream_message(auth, model, history_to_send, tx).await;
@@ -581,6 +755,8 @@ impl GeminiApp {
 
     fn poll_chat(&mut self) {
         // Poll all tabs concurrently so background tabs stream uninterrupted
+        let mut tabs_to_save: Vec<u64> = Vec::new();
+
         for tab in &mut self.tabs {
             if !tab.is_streaming {
                 continue;
@@ -610,7 +786,12 @@ impl GeminiApp {
                 tab.pending_response.clear();
                 tab.is_streaming = false;
                 tab.chat_rx = None;
+                tabs_to_save.push(tab.id);
             }
+        }
+
+        for id in tabs_to_save {
+            self.save_tab_conversation(id);
         }
     }
 }
@@ -637,6 +818,10 @@ impl eframe::App for GeminiApp {
             self.prev_tab();
         } else if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::Tab)) {
             self.next_tab();
+        }
+        // Ctrl+H: Toggle History Sidebar
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::H)) {
+            self.show_history_sidebar = !self.show_history_sidebar;
         }
 
         // Repaint if any tab is streaming or auth in progress
@@ -739,7 +924,24 @@ impl GeminiApp {
                             .strong(),
                     );
 
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
+
+                    // History Toggle Button
+                    let hist_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new(if self.show_history_sidebar { "💬 Hide History" } else { "💬 History" })
+                                .size(12.5)
+                                .color(if self.show_history_sidebar { Color32::from_rgb(120, 190, 255) } else { Color32::WHITE }),
+                        )
+                        .fill(if self.show_history_sidebar { Color32::from_rgb(38, 48, 65) } else { Color32::from_rgb(43, 44, 48) })
+                        .rounding(Rounding::same(16.0))
+                        .stroke(Stroke::new(1.0_f32, if self.show_history_sidebar { Color32::from_rgb(66, 133, 244) } else { Color32::from_rgb(52, 54, 60) })),
+                    ).on_hover_text("Toggle Previous Conversations (Ctrl+H)");
+                    if hist_btn.clicked() {
+                        self.show_history_sidebar = !self.show_history_sidebar;
+                    }
+
+                    ui.add_space(8.0);
 
                     // New Chat Button
                     let new_chat_btn = ui.add(
@@ -1277,6 +1479,7 @@ impl GeminiApp {
                             tab.copied_idx = None;
                             tab.title = "New chat".to_string();
                         }
+                        self.persist_session();
                     }
 
                     ui.add_space(12.0);
@@ -1290,6 +1493,223 @@ impl GeminiApp {
                         );
                     }
                 });
+        }
+
+        // ── History Sidebar (Previous Conversations) ──────────────────────────
+        let mut open_stored_id: Option<String> = None;
+        let mut delete_stored_id: Option<String> = None;
+        let mut do_clear_all_history = false;
+
+        if self.show_history_sidebar {
+            egui::SidePanel::left("history_sidebar")
+                .frame(
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(22, 23, 26))
+                        .inner_margin(egui::Margin::symmetric(12.0, 14.0))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 39, 44))),
+                )
+                .resizable(true)
+                .default_width(260.0)
+                .width_range(200.0..=400.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("💬 Previous Chats")
+                                .size(14.0)
+                                .color(Color32::WHITE)
+                                .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let close_btn = ui.add(
+                                egui::Button::new(RichText::new("⮜").size(14.0).color(Color32::from_gray(160)))
+                                    .fill(Color32::TRANSPARENT),
+                            ).on_hover_text("Collapse sidebar (Ctrl+H)");
+                            if close_btn.clicked() {
+                                self.show_history_sidebar = false;
+                            }
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // New Chat Button inside sidebar
+                    let new_chat = ui.add_sized(
+                        egui::vec2(ui.available_width(), 32.0),
+                        egui::Button::new(
+                            RichText::new("✨ + New chat")
+                                .size(13.0)
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(Color32::from_rgb(38, 48, 65))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 133, 244)))
+                        .rounding(Rounding::same(8.0)),
+                    );
+                    if new_chat.clicked() {
+                        self.add_new_tab();
+                    }
+
+                    ui.add_space(8.0);
+
+                    // Search input
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.history_search)
+                            .hint_text("🔍 Search chats…")
+                            .desired_width(ui.available_width()),
+                    );
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    let search_q = self.history_search.trim().to_lowercase();
+                    let matching_convs: Vec<StoredConversation> = self
+                        .stored_conversations
+                        .iter()
+                        .filter(|c| {
+                            if search_q.is_empty() {
+                                true
+                            } else {
+                                c.title.to_lowercase().contains(&search_q)
+                                    || c.history.iter().any(|m| m.content.to_lowercase().contains(&search_q))
+                            }
+                        })
+                        .cloned()
+                        .collect();
+
+                    if matching_convs.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(28.0);
+                            ui.label(RichText::new("No saved chats").size(12.5).color(Color32::from_gray(140)));
+                            ui.add_space(4.0);
+                            if !search_q.is_empty() {
+                                ui.label(RichText::new("No matches found").size(11.0).color(Color32::from_gray(110)));
+                            } else {
+                                ui.label(RichText::new("Conversations will appear here").size(11.0).color(Color32::from_gray(110)));
+                            }
+                        });
+                    } else {
+                        let active_conv_id = self.active_tab().map(|t| t.conv_id.clone());
+
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for conv in matching_convs {
+                                    let is_active = active_conv_id.as_deref() == Some(&conv.id);
+
+                                    let card_bg = if is_active {
+                                        Color32::from_rgb(33, 42, 58)
+                                    } else {
+                                        Color32::from_rgb(26, 27, 31)
+                                    };
+
+                                    let border_color = if is_active {
+                                        Color32::from_rgb(66, 133, 244)
+                                    } else {
+                                        Color32::from_rgb(40, 42, 48)
+                                    };
+
+                                    let frame = egui::Frame::none()
+                                        .fill(card_bg)
+                                        .rounding(Rounding::same(8.0))
+                                        .stroke(Stroke::new(1.0_f32, border_color))
+                                        .inner_margin(egui::Margin::symmetric(10.0, 8.0));
+
+                                    let mut delete_clicked = false;
+                                    let frame_resp = frame.show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new("💬").size(12.0));
+                                                    let display_title = if conv.title.trim().is_empty() {
+                                                        "New chat"
+                                                    } else {
+                                                        &conv.title
+                                                    };
+                                                    ui.label(
+                                                        RichText::new(display_title)
+                                                            .size(12.5)
+                                                            .color(Color32::WHITE)
+                                                            .strong(),
+                                                    );
+                                                });
+                                                ui.add_space(2.0);
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new(conv.formatted_date())
+                                                            .size(10.5)
+                                                            .color(Color32::from_rgb(120, 190, 255)),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!("• {} msgs", conv.history.len()))
+                                                            .size(10.5)
+                                                            .color(Color32::from_gray(130)),
+                                                    );
+                                                });
+                                                ui.add_space(2.0);
+                                                ui.label(
+                                                    RichText::new(conv.preview_text())
+                                                        .size(11.0)
+                                                        .color(Color32::from_gray(160)),
+                                                );
+                                            });
+
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                let del_btn = ui.add(
+                                                    egui::Button::new(RichText::new("🗑").size(12.0).color(Color32::from_gray(140)))
+                                                        .fill(Color32::TRANSPARENT),
+                                                ).on_hover_text("Delete conversation");
+                                                if del_btn.clicked() {
+                                                    delete_clicked = true;
+                                                }
+                                            });
+                                        });
+                                    });
+
+                                    if delete_clicked {
+                                        delete_stored_id = Some(conv.id);
+                                    } else if frame_resp.response.interact(egui::Sense::click()).clicked() {
+                                        open_stored_id = Some(conv.id);
+                                    }
+
+                                    ui.add_space(6.0);
+                                }
+
+                                if !self.stored_conversations.is_empty() {
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.add_space(4.0);
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Clear all stored history")
+                                                    .size(11.0)
+                                                    .color(Color32::from_rgb(230, 90, 90)),
+                                            )
+                                            .fill(Color32::TRANSPARENT),
+                                        )
+                                        .on_hover_text("Permanently delete all conversation history")
+                                        .clicked()
+                                    {
+                                        do_clear_all_history = true;
+                                    }
+                                }
+                            });
+                    }
+                });
+        }
+
+        if let Some(conv_id) = open_stored_id {
+            self.open_stored_conversation(&conv_id);
+            ctx.request_repaint();
+        }
+        if let Some(conv_id) = delete_stored_id {
+            self.delete_stored_conversation(&conv_id);
+            ctx.request_repaint();
+        }
+        if do_clear_all_history {
+            self.clear_all_stored_history();
+            ctx.request_repaint();
         }
 
         // ── Bottom Floating Input Area ────────────────────────────────────────
@@ -1373,6 +1793,7 @@ impl GeminiApp {
             .frame(egui::Frame::none().fill(Color32::from_rgb(19, 19, 20)))
             .show(ctx, |ui| {
                 let mut card_clicked_prompt: Option<String> = None;
+                let mut card_clicked_conv: Option<String> = None;
                 let mut copy_target: Option<(usize, String)> = None;
 
                 let scroll_to_bottom = self.active_tab().map(|t| t.scroll_to_bottom).unwrap_or(false);
@@ -1401,7 +1822,7 @@ impl GeminiApp {
                         let first_name = user_name.split_whitespace().next().unwrap_or("there");
 
                         ui.vertical_centered(|ui| {
-                            ui.add_space(ui.available_height() / 6.0);
+                            ui.add_space(ui.available_height() / 8.0);
 
                             ui.label(
                                 RichText::new(format!("✦ Hello, {}", first_name))
@@ -1415,7 +1836,61 @@ impl GeminiApp {
                                     .size(18.0)
                                     .color(Color32::from_gray(160)),
                             );
-                            ui.add_space(32.0);
+                            ui.add_space(28.0);
+
+                            // Quick Resume Recent Conversations
+                            if !self.stored_conversations.is_empty() {
+                                ui.label(
+                                    RichText::new("🕒 Resume Previous Conversation")
+                                        .size(14.0)
+                                        .color(Color32::from_rgb(140, 190, 255))
+                                        .strong(),
+                                );
+                                ui.add_space(8.0);
+
+                                for conv in self.stored_conversations.iter().take(3) {
+                                    let card = egui::Frame::none()
+                                        .fill(Color32::from_rgb(26, 28, 33))
+                                        .rounding(Rounding::same(10.0))
+                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 48, 55)))
+                                        .inner_margin(egui::Margin::symmetric(18.0, 10.0));
+
+                                    card.show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("💬").size(13.0));
+                                            let display_title = if conv.title.trim().is_empty() {
+                                                "New chat"
+                                            } else {
+                                                &conv.title
+                                            };
+                                            if ui
+                                                .add(
+                                                    egui::Label::new(
+                                                        RichText::new(display_title)
+                                                            .size(13.0)
+                                                            .color(Color32::WHITE)
+                                                            .strong(),
+                                                    )
+                                                    .sense(egui::Sense::click()),
+                                                )
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                .clicked()
+                                            {
+                                                card_clicked_conv = Some(conv.id.clone());
+                                            }
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.label(
+                                                    RichText::new(conv.formatted_date())
+                                                        .size(11.0)
+                                                        .color(Color32::from_gray(140)),
+                                                );
+                                            });
+                                        });
+                                    });
+                                    ui.add_space(6.0);
+                                }
+                                ui.add_space(16.0);
+                            }
 
                             // Quick Prompt Cards
                             let suggestions = [
@@ -1585,6 +2060,12 @@ impl GeminiApp {
                         tab.input = prompt;
                     }
                     self.send_message(ctx.clone());
+                }
+
+                // Handle Resume Recent Conversation click
+                if let Some(conv_id) = card_clicked_conv {
+                    self.open_stored_conversation(&conv_id);
+                    ctx.request_repaint();
                 }
 
                 // Handle Copy Request
