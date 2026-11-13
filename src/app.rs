@@ -153,7 +153,7 @@ impl ConversationTab {
             is_streaming: false,
             pending_response: String::new(),
             copied_idx: None,
-            scroll_to_bottom: true,
+            scroll_to_bottom: false,
             chat_rx: None,
             markdown_cache: CommonMarkCache::default(),
         }
@@ -1771,7 +1771,7 @@ impl GeminiApp {
 
                             let (has_text, is_streaming) = if let Some(tab) = self.active_tab_mut() {
                                 let input_edit = egui::TextEdit::multiline(&mut tab.input)
-                                    .hint_text("Ask Gemini anything… (Enter to send, Shift+Enter for newline)")
+                                    .hint_text("Ask Gemini anything…")
                                     .desired_rows(2)
                                     .desired_width(available_w);
 
@@ -1789,21 +1789,21 @@ impl GeminiApp {
                             };
 
                             // Send button
-                            let btn_fill = if is_streaming {
-                                Color32::from_rgb(50, 50, 55)
+                            let (btn_fill, btn_color) = if is_streaming {
+                                (Color32::from_rgb(50, 50, 55), Color32::from_gray(180))
                             } else if has_text {
-                                Color32::from_rgb(26, 115, 232)
+                                (Color32::from_rgb(26, 115, 232), Color32::WHITE)
                             } else {
-                                Color32::from_rgb(45, 46, 50)
+                                (Color32::from_rgb(42, 43, 47), Color32::from_gray(140))
                             };
 
                             let btn_icon = if is_streaming { "⏳" } else { "➤" };
                             let send_btn = ui.add_sized(
-                                Vec2::new(42.0, 38.0),
-                                egui::Button::new(RichText::new(btn_icon).size(16.0).color(Color32::WHITE))
+                                Vec2::new(38.0, 36.0),
+                                egui::Button::new(RichText::new(btn_icon).size(15.0).color(btn_color))
                                     .fill(btn_fill)
-                                    .rounding(Rounding::same(20.0)),
-                            );
+                                    .rounding(Rounding::same(18.0)),
+                            ).on_hover_text("Send message (Enter)");
 
                             if send_btn.clicked() {
                                 should_send = true;
@@ -1830,11 +1830,19 @@ impl GeminiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(19, 19, 20)))
             .show(ctx, |ui| {
-                let mut card_clicked_prompt: Option<String> = None;
-                let mut card_clicked_conv: Option<String> = None;
                 let mut copy_target: Option<(usize, String)> = None;
 
-                let scroll_to_bottom = self.active_tab().map(|t| t.scroll_to_bottom).unwrap_or(false);
+                let (is_empty, is_streaming) = if let Some(tab) = self.active_tab() {
+                    (tab.history.is_empty(), tab.is_streaming)
+                } else {
+                    (true, false)
+                };
+
+                let scroll_to_bottom = if is_empty {
+                    false
+                } else {
+                    self.active_tab().map(|t| t.scroll_to_bottom).unwrap_or(false)
+                };
 
                 let scroll = egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
@@ -1843,14 +1851,7 @@ impl GeminiApp {
                 scroll.show(ui, |ui| {
                     ui.add_space(16.0);
 
-                    // Check active tab state
-                    let (is_empty, is_streaming) = if let Some(tab) = self.active_tab() {
-                        (tab.history.is_empty(), tab.is_streaming)
-                    } else {
-                        (true, false)
-                    };
-
-                    // ── Empty State / Welcome Screen ──────────────────────────
+                    // ── Empty State / Clean Gemini Welcome Screen ─────────────
                     if is_empty && !is_streaming {
                         let user_name = if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
                             tokens.display_name.clone().unwrap_or_else(|| "there".to_string())
@@ -1860,117 +1861,29 @@ impl GeminiApp {
                         let first_name = user_name.split_whitespace().next().unwrap_or("there");
 
                         ui.vertical_centered(|ui| {
-                            ui.add_space(ui.available_height() / 9.0);
+                            let pad = (ui.available_height() - 180.0).max(40.0) / 2.3;
+                            ui.add_space(pad);
 
                             if let Some(ref tex) = sparkle_tex {
                                 ui.add(
                                     egui::Image::new(tex)
-                                        .fit_to_exact_size(egui::vec2(52.0, 52.0)),
+                                        .fit_to_exact_size(egui::vec2(64.0, 64.0)),
                                 );
-                                ui.add_space(6.0);
+                                ui.add_space(16.0);
                             }
 
                             ui.label(
                                 RichText::new(format!("✦ Hello, {}", first_name))
-                                    .size(36.0)
+                                    .size(38.0)
                                     .color(Color32::from_rgb(120, 190, 255))
                                     .strong(),
                             );
-                            ui.add_space(8.0);
+                            ui.add_space(10.0);
                             ui.label(
                                 RichText::new("How can I help you today?")
-                                    .size(18.0)
+                                    .size(19.0)
                                     .color(Color32::from_gray(160)),
                             );
-                            ui.add_space(28.0);
-
-                            // Quick Resume Recent Conversations
-                            if !self.stored_conversations.is_empty() {
-                                ui.label(
-                                    RichText::new("🕒 Resume Previous Conversation")
-                                        .size(14.0)
-                                        .color(Color32::from_rgb(140, 190, 255))
-                                        .strong(),
-                                );
-                                ui.add_space(8.0);
-
-                                for conv in self.stored_conversations.iter().take(3) {
-                                    let card = egui::Frame::none()
-                                        .fill(Color32::from_rgb(26, 28, 33))
-                                        .rounding(Rounding::same(10.0))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 48, 55)))
-                                        .inner_margin(egui::Margin::symmetric(18.0, 10.0));
-
-                                    card.show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new("💬").size(13.0));
-                                            let display_title = if conv.title.trim().is_empty() {
-                                                "New chat"
-                                            } else {
-                                                &conv.title
-                                            };
-                                            if ui
-                                                .add(
-                                                    egui::Label::new(
-                                                        RichText::new(display_title)
-                                                            .size(13.0)
-                                                            .color(Color32::WHITE)
-                                                            .strong(),
-                                                    )
-                                                    .sense(egui::Sense::click()),
-                                                )
-                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                                .clicked()
-                                            {
-                                                card_clicked_conv = Some(conv.id.clone());
-                                            }
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                ui.label(
-                                                    RichText::new(conv.formatted_date())
-                                                        .size(11.0)
-                                                        .color(Color32::from_gray(140)),
-                                                );
-                                            });
-                                        });
-                                    });
-                                    ui.add_space(6.0);
-                                }
-                                ui.add_space(16.0);
-                            }
-
-                            // Quick Prompt Cards
-                            let suggestions = [
-                                "🚀 Write a high-performance async Rust microservice with Axum",
-                                "🧠 Explain quantum computing principles in simple terms",
-                                "⚡ Optimize algorithm time and space complexity in Rust",
-                                "📝 Draft a concise technical architecture proposal",
-                            ];
-
-                            for prompt in suggestions {
-                                let card = egui::Frame::none()
-                                    .fill(Color32::from_rgb(28, 29, 32))
-                                    .rounding(Rounding::same(12.0))
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 47, 52)))
-                                    .inner_margin(egui::Margin::symmetric(20.0, 12.0));
-
-                                card.show(ui, |ui| {
-                                    if ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(prompt)
-                                                    .size(13.0)
-                                                    .color(Color32::from_gray(200)),
-                                            )
-                                            .sense(egui::Sense::click()),
-                                        )
-                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                        .clicked()
-                                    {
-                                        card_clicked_prompt = Some(prompt.to_string());
-                                    }
-                                });
-                                ui.add_space(8.0);
-                            }
                         });
                     }
 
@@ -2098,20 +2011,6 @@ impl GeminiApp {
 
                 if let Some(tab) = self.active_tab_mut() {
                     tab.scroll_to_bottom = false;
-                }
-
-                // Handle Prompt card click
-                if let Some(prompt) = card_clicked_prompt {
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.input = prompt;
-                    }
-                    self.send_message(ctx.clone());
-                }
-
-                // Handle Resume Recent Conversation click
-                if let Some(conv_id) = card_clicked_conv {
-                    self.open_stored_conversation(&conv_id);
-                    ctx.request_repaint();
                 }
 
                 // Handle Copy Request
