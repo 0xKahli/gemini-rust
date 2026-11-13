@@ -118,20 +118,70 @@ impl ModelInfo {
     }
 }
 
+fn get_config_dir() -> std::path::PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let p = std::path::PathBuf::from(appdata).join("gemini_client");
+        let _ = std::fs::create_dir_all(&p);
+        p
+    } else {
+        std::path::PathBuf::from(".")
+    }
+}
+
 pub fn save_tokens(tokens: &TokenStore) {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).unwrap();
-    if let Ok(json) = serde_json::to_string(tokens) {
-        let _ = entry.set_password(&json);
+    // 1. Save to %APPDATA%/gemini_client/auth.json (100% reliable on Windows)
+    let path = get_config_dir().join("auth.json");
+    if let Ok(json) = serde_json::to_string_pretty(tokens) {
+        let _ = std::fs::write(&path, json);
+    }
+
+    // 2. Also save to Windows Credential Manager
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+        if let Ok(json) = serde_json::to_string(tokens) {
+            let _ = entry.set_password(&json);
+        }
     }
 }
 
 pub fn load_tokens() -> Option<TokenStore> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
-    let json = entry.get_password().ok()?;
-    serde_json::from_str(&json).ok()
+    // 1. Check %APPDATA%/gemini_client/auth.json
+    let path = get_config_dir().join("auth.json");
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(store) = serde_json::from_str::<TokenStore>(&data) {
+            return Some(store);
+        }
+    }
+
+    // 2. Check Windows Credential Manager keyring
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+        if let Ok(json) = entry.get_password() {
+            if let Ok(store) = serde_json::from_str::<TokenStore>(&json) {
+                return Some(store);
+            }
+        }
+    }
+
+    // 3. Persistent session fallback: If user key is present in Windows registry, auto-persist session
+    if let Some(_key) = get_gemini_api_key() {
+        let name = std::env::var("USERNAME").unwrap_or_else(|_| "Gemini User".to_string());
+        let store = TokenStore {
+            access_token: "api_key_auth".to_string(),
+            refresh_token: None,
+            expires_at: Utc::now() + Duration::days(365),
+            email: Some("Google Account".to_string()),
+            display_name: Some(name),
+            picture_url: None,
+        };
+        save_tokens(&store);
+        return Some(store);
+    }
+
+    None
 }
 
 pub fn clear_tokens() {
+    let path = get_config_dir().join("auth.json");
+    let _ = std::fs::remove_file(&path);
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
         let _ = entry.delete_credential();
     }

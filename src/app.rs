@@ -4,12 +4,12 @@ use crate::auth::{
 };
 use crate::gemini::{stream_message, AuthMethod};
 use crate::types::{Message, Role};
-use egui::{Color32, FontId, RichText, Rounding, Stroke, Vec2};
+use egui::{Color32, RichText, Rounding, Stroke, Vec2};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-// ── App state ────────────────────────────────────────────────────────────────
+// ── Verified Live Working Models ─────────────────────────────────────────────
 
 fn default_models(is_pro: bool) -> Vec<ModelInfo> {
     let mut list = vec![
@@ -61,17 +61,13 @@ fn default_models(is_pro: bool) -> Vec<ModelInfo> {
 }
 
 enum AuthState {
-    /// Not logged in
     LoggedOut,
-    /// Login in progress (browser open)
     LoggingIn,
-    /// Logged in with token + available models
     LoggedIn {
         tokens: TokenStore,
         models: Vec<ModelInfo>,
         loading_models: bool,
     },
-    /// Auth error message
     Error(String),
 }
 
@@ -87,21 +83,16 @@ pub struct GeminiApp {
     selected_model_idx: usize,
     system_prompt: String,
     show_settings: bool,
-    #[allow(dead_code)]
-    show_system_prompt: bool,
 
     // Streaming
     runtime: Arc<tokio::runtime::Runtime>,
-    // Channels for auth tasks
-    #[allow(dead_code)]
-    auth_tx: Option<mpsc::Sender<AuthTaskResult>>,
     auth_rx: Option<mpsc::Receiver<AuthTaskResult>>,
-    // Channels for chat streaming
     chat_rx: Option<mpsc::Receiver<String>>,
     is_streaming: bool,
     pending_response: String,
 
-    // UI
+    // UI Feedback
+    copied_idx: Option<usize>,
     markdown_cache: CommonMarkCache,
     scroll_to_bottom: bool,
 }
@@ -131,13 +122,13 @@ impl GeminiApp {
             "Free Plan".to_string()
         };
 
-        // Try loading saved tokens from keychain
+        // Load saved session from %APPDATA%/gemini_client/auth.json or keyring
         let saved = load_tokens();
         let auth_state = match saved {
             Some(tokens) => AuthState::LoggedIn {
                 tokens,
                 models: default_models(is_pro_plan),
-                loading_models: true, // will trigger model fetch on first frame
+                loading_models: true,
             },
             None => AuthState::LoggedOut,
         };
@@ -151,13 +142,12 @@ impl GeminiApp {
             selected_model_idx: 0,
             system_prompt: String::new(),
             show_settings: false,
-            show_system_prompt: false,
             runtime,
-            auth_tx: None,
             auth_rx: None,
             chat_rx: None,
             is_streaming: false,
             pending_response: String::new(),
+            copied_idx: None,
             markdown_cache: CommonMarkCache::default(),
             scroll_to_bottom: false,
         }
@@ -213,20 +203,6 @@ impl GeminiApp {
         });
     }
 
-    #[allow(dead_code)]
-    fn set_pro_plan(&mut self, is_pro: bool, ctx: egui::Context) {
-        self.is_pro_plan = is_pro;
-        save_is_pro_plan(is_pro);
-        if let AuthState::LoggedIn { models, tokens, loading_models } = &mut self.auth_state {
-            *models = default_models(is_pro);
-            *loading_models = true;
-            self.selected_model_idx = 0;
-            let tokens_clone = tokens.clone();
-            self.fetch_models(tokens_clone, ctx.clone());
-        }
-        ctx.request_repaint();
-    }
-
     fn refresh_token_if_needed(&mut self, ctx: egui::Context) {
         if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
             if tokens.is_expired() {
@@ -238,7 +214,7 @@ impl GeminiApp {
                         Ok(new_tokens) => {
                             let _ = tx.send(AuthTaskResult::TokenRefreshed(new_tokens)).await;
                         }
-                        Err(_) => {} // Will just fail on next API call
+                        Err(_) => {}
                     }
                     ctx.request_repaint();
                 });
@@ -247,7 +223,6 @@ impl GeminiApp {
     }
 
     fn poll_auth(&mut self, ctx: &egui::Context) {
-        // Check for pending model fetch trigger
         if let AuthState::LoggedIn { tokens, models, loading_models } = &self.auth_state {
             if *loading_models && models.is_empty() && self.auth_rx.is_none() {
                 let tokens_clone = tokens.clone();
@@ -355,8 +330,20 @@ impl GeminiApp {
 
         let mut history_to_send = self.history.clone();
         if !self.system_prompt.is_empty() && history_to_send.len() == 1 {
-            history_to_send.insert(0, Message { role: Role::User, content: format!("System instructions: {}\n\nAcknowledge briefly.", self.system_prompt) });
-            history_to_send.insert(1, Message { role: Role::Model, content: "Understood.".to_string() });
+            history_to_send.insert(
+                0,
+                Message {
+                    role: Role::User,
+                    content: format!("System instructions: {}\n\nAcknowledge briefly.", self.system_prompt),
+                },
+            );
+            history_to_send.insert(
+                1,
+                Message {
+                    role: Role::Model,
+                    content: "Understood.".to_string(),
+                },
+            );
         }
 
         self.runtime.spawn(async move {
@@ -396,7 +383,7 @@ impl GeminiApp {
     }
 }
 
-// ── egui UI ───────────────────────────────────────────────────────────────────
+// ── Application UI ───────────────────────────────────────────────────────────
 
 impl eframe::App for GeminiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -421,291 +408,552 @@ impl eframe::App for GeminiApp {
 
 impl GeminiApp {
     fn draw_login_screen(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() / 4.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(Color32::from_rgb(19, 19, 20)))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() / 4.0);
 
-                ui.label(RichText::new("✦").size(48.0).color(Color32::from_rgb(100, 180, 255)));
-                ui.add_space(8.0);
-                ui.label(RichText::new("Gemini Client").size(28.0).strong());
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new("Native. Fast. No browser required.")
-                        .size(14.0)
-                        .color(Color32::from_gray(160)),
-                );
-                ui.add_space(32.0);
+                    ui.label(
+                        RichText::new("✦")
+                            .size(54.0)
+                            .color(Color32::from_rgb(120, 190, 255)),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Gemini")
+                            .size(32.0)
+                            .color(Color32::WHITE)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Fast, lightweight native desktop experience.")
+                            .size(15.0)
+                            .color(Color32::from_gray(160)),
+                    );
+                    ui.add_space(36.0);
 
-                match &self.auth_state {
-                    AuthState::LoggedOut => {
-                        let btn = ui.add_sized(
-                            Vec2::new(220.0, 44.0),
-                            egui::Button::new(
-                                RichText::new("🔑  Sign in with Google").size(15.0),
-                            ),
-                        );
-                        if btn.clicked() {
-                            self.start_login(ctx.clone());
-                        }
-                    }
-                    AuthState::LoggingIn => {
-                        ui.spinner();
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("Opening browser… complete sign-in there.")
-                                .color(Color32::from_gray(180)),
-                        );
-                    }
-                    AuthState::Error(e) => {
-                        ui.colored_label(Color32::RED, format!("⚠ {}", e));
-                        ui.add_space(12.0);
-                        if ui.button("Try again").clicked() {
-                            self.auth_state = AuthState::LoggedOut;
-                        }
-                    }
-                    _ => {}
-                }
-            });
-        });
-    }
-
-    fn draw_chat_ui(&mut self, ctx: &egui::Context) {
-        // ── Top bar ───────────────────────────────────────────────────────────
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("✦ Gemini").size(17.0).color(Color32::from_rgb(100, 180, 255)));
-                ui.separator();
-
-                // Model selector from live API list
-                if let AuthState::LoggedIn { models, loading_models, .. } = &self.auth_state {
-                    if *loading_models && models.is_empty() {
-                        ui.spinner();
-                        ui.label(RichText::new("Loading models…").color(Color32::from_gray(160)));
-                    } else {
-                        let selected_name = models
-                            .get(self.selected_model_idx)
-                            .map(|m| m.display_name.as_str())
-                            .unwrap_or("Select model");
-
-                        egui::ComboBox::from_id_salt("model_select")
-                            .selected_text(selected_name)
-                            .width(300.0)
-                            .show_ui(ui, |ui| {
-                                for (i, model) in models.iter().enumerate() {
-                                    ui.selectable_value(
-                                        &mut self.selected_model_idx,
-                                        i,
-                                        &model.display_name,
-                                    )
-                                    .on_hover_text(&model.description);
-                                }
-                            });
-                    }
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // User avatar / sign out
-                    if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
-                        let name = tokens
-                            .display_name
-                            .as_deref()
-                            .or(tokens.email.as_deref())
-                            .unwrap_or("Account")
-                            .to_string();
-                        let email = tokens.email.clone();
-
-                        ui.menu_button(format!("👤 {}", name), |ui| {
-                            ui.set_min_width(180.0);
-                            if let Some(ref e) = email {
-                                ui.label(RichText::new(e).color(Color32::from_gray(160)).size(11.0));
-                                ui.separator();
+                    match &self.auth_state {
+                        AuthState::LoggedOut => {
+                            let btn = ui.add_sized(
+                                Vec2::new(240.0, 48.0),
+                                egui::Button::new(
+                                    RichText::new("🔑  Sign in with Google")
+                                        .size(15.0)
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(Color32::from_rgb(26, 115, 232))
+                                .rounding(Rounding::same(24.0)),
+                            );
+                            if btn.clicked() {
+                                self.start_login(ctx.clone());
                             }
-                            let plan_label = if self.is_pro_plan { "✦ Gemini Pro Plan" } else { "Free Tier Plan" };
-                            ui.label(RichText::new(plan_label).color(Color32::from_rgb(100, 180, 255)).strong().size(12.0));
-                            ui.separator();
-                            if ui.button("⚙ Settings").clicked() {
-                                self.show_settings = !self.show_settings;
-                                ui.close_menu();
-                            }
-                            ui.separator();
-                            if ui.button("🚪 Sign out").clicked() {
-                                clear_tokens();
+                        }
+                        AuthState::LoggingIn => {
+                            ui.spinner();
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new("Opening browser… complete sign-in there.")
+                                    .color(Color32::from_gray(190)),
+                            );
+                        }
+                        AuthState::Error(e) => {
+                            ui.colored_label(Color32::from_rgb(255, 100, 100), format!("⚠ {}", e));
+                            ui.add_space(12.0);
+                            if ui.button("Try again").clicked() {
                                 self.auth_state = AuthState::LoggedOut;
-                                self.history.clear();
-                                ui.close_menu();
                             }
-                        });
-
-                        // Auto-detected plan badge
-                        let badge_color = if self.is_pro_plan {
-                            Color32::from_rgb(255, 215, 80)
-                        } else {
-                            Color32::from_rgb(130, 190, 255)
-                        };
-                        let badge_text = if self.is_pro_plan {
-                            "✦ PRO PLAN"
-                        } else {
-                            "FREE PLAN"
-                        };
-                        let badge = RichText::new(badge_text)
-                            .color(badge_color)
-                            .strong()
-                            .size(11.0);
-                        egui::Frame::none()
-                            .fill(Color32::from_gray(35))
-                            .rounding(Rounding::same(6.0))
-                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.label(badge);
-                            });
+                        }
+                        _ => {}
                     }
                 });
             });
-        });
+    }
 
-        // ── Settings side panel ───────────────────────────────────────────────
+    fn draw_chat_ui(&mut self, ctx: &egui::Context) {
+        // ── Top Navigation Bar ────────────────────────────────────────────────
+        egui::TopBottomPanel::top("top_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(27, 28, 29))
+                    .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 43, 46))),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    // Logo
+                    ui.label(
+                        RichText::new("✦ Gemini")
+                            .size(18.0)
+                            .color(Color32::from_rgb(120, 190, 255))
+                            .strong(),
+                    );
+
+                    ui.add_space(12.0);
+
+                    // New Chat Button
+                    let new_chat_btn = ui.add(
+                        egui::Button::new(RichText::new("+ New chat").size(13.0).color(Color32::WHITE))
+                            .fill(Color32::from_rgb(43, 44, 48))
+                            .rounding(Rounding::same(16.0)),
+                    );
+                    if new_chat_btn.clicked() {
+                        self.history.clear();
+                        self.pending_response.clear();
+                        self.is_streaming = false;
+                        self.copied_idx = None;
+                    }
+
+                    ui.add_space(16.0);
+
+                    // Model Selector Dropdown
+                    if let AuthState::LoggedIn { models, loading_models, .. } = &self.auth_state {
+                        if *loading_models && models.is_empty() {
+                            ui.spinner();
+                            ui.label(RichText::new("Loading models…").color(Color32::from_gray(160)));
+                        } else {
+                            let selected_name = models
+                                .get(self.selected_model_idx)
+                                .map(|m| m.display_name.as_str())
+                                .unwrap_or("Select model");
+
+                            egui::ComboBox::from_id_salt("model_select")
+                                .selected_text(RichText::new(selected_name).size(13.0).color(Color32::WHITE))
+                                .width(280.0)
+                                .show_ui(ui, |ui| {
+                                    for (i, model) in models.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut self.selected_model_idx,
+                                            i,
+                                            &model.display_name,
+                                        )
+                                        .on_hover_text(&model.description);
+                                    }
+                                });
+                        }
+                    }
+
+                    // Right items: Plan Badge + Account + Settings
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
+                            let name = tokens
+                                .display_name
+                                .as_deref()
+                                .or(tokens.email.as_deref())
+                                .unwrap_or("Account")
+                                .to_string();
+                            let email = tokens.email.clone();
+
+                            // Settings toggle
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("⚙").size(16.0))
+                                        .fill(Color32::TRANSPARENT)
+                                )
+                                .on_hover_text("Open Settings")
+                                .clicked()
+                            {
+                                self.show_settings = !self.show_settings;
+                            }
+
+                            ui.add_space(6.0);
+
+                            // User Profile Menu Button
+                            ui.menu_button(
+                                format!("👤 {}", name),
+                                |ui| {
+                                    ui.set_min_width(200.0);
+                                    if let Some(ref e) = email {
+                                        ui.label(RichText::new(e).color(Color32::from_gray(160)).size(11.0));
+                                        ui.separator();
+                                    }
+                                    ui.label(
+                                        RichText::new(format!("Plan: {}", self.detected_plan_name))
+                                            .color(Color32::from_rgb(120, 190, 255))
+                                            .strong()
+                                            .size(12.0),
+                                    );
+                                    ui.separator();
+                                    if ui.button("⚙ Settings").clicked() {
+                                        self.show_settings = !self.show_settings;
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
+                                    if ui.button("🚪 Sign out").clicked() {
+                                        clear_tokens();
+                                        self.auth_state = AuthState::LoggedOut;
+                                        self.history.clear();
+                                        ui.close_menu();
+                                    }
+                                },
+                            );
+
+                            ui.add_space(6.0);
+
+                            // Auto-detected plan badge
+                            let (badge_color, badge_bg) = if self.is_pro_plan {
+                                (Color32::from_rgb(255, 215, 80), Color32::from_rgb(50, 42, 20))
+                            } else {
+                                (Color32::from_rgb(130, 190, 255), Color32::from_rgb(25, 38, 55))
+                            };
+                            let badge_text = if self.is_pro_plan { "✦ PRO" } else { "FREE" };
+                            egui::Frame::none()
+                                .fill(badge_bg)
+                                .rounding(Rounding::same(12.0))
+                                .stroke(Stroke::new(1.0_f32, badge_color))
+                                .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(badge_text)
+                                            .color(badge_color)
+                                            .size(11.0)
+                                            .strong(),
+                                    );
+                                });
+                        }
+                    });
+                });
+            });
+
+        // ── Settings Drawer Panel ─────────────────────────────────────────────
         if self.show_settings {
             egui::SidePanel::right("settings_panel")
+                .frame(
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(27, 28, 29))
+                        .inner_margin(egui::Margin::symmetric(16.0, 16.0))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 43, 46))),
+                )
                 .resizable(true)
-                .default_width(280.0)
+                .default_width(300.0)
                 .show(ctx, |ui| {
-                    ui.heading("Settings");
+                    ui.horizontal(|ui| {
+                        ui.heading(RichText::new("Settings").color(Color32::WHITE));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("✕").clicked() {
+                                self.show_settings = false;
+                            }
+                        });
+                    });
                     ui.separator();
 
-                    ui.label(RichText::new("Account Plan:").strong());
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Account Plan").strong().color(Color32::WHITE));
                     let plan_color = if self.is_pro_plan {
                         Color32::from_rgb(255, 215, 80)
                     } else {
                         Color32::from_rgb(130, 190, 255)
                     };
-                    ui.colored_label(plan_color, RichText::new(&self.detected_plan_name).size(14.0).strong());
-                    ui.label(RichText::new("Auto-detected live from your Google account quota.").color(Color32::from_gray(150)).size(11.0));
+                    ui.colored_label(
+                        plan_color,
+                        RichText::new(format!("● {}", self.detected_plan_name)).size(15.0).strong(),
+                    );
+                    ui.label(
+                        RichText::new("Auto-detected directly from your Google account quota.")
+                            .color(Color32::from_gray(150))
+                            .size(11.0),
+                    );
 
-                    ui.add_space(8.0);
+                    ui.add_space(16.0);
                     ui.separator();
 
-                    ui.label("System Prompt:");
+                    ui.label(RichText::new("System Instructions").strong().color(Color32::WHITE));
                     ui.add(
                         egui::TextEdit::multiline(&mut self.system_prompt)
-                            .hint_text("Optional instructions for Gemini…")
+                            .hint_text("Optional persona or guidelines for Gemini…")
                             .desired_rows(5)
                             .desired_width(f32::INFINITY),
                     );
 
-                    ui.add_space(12.0);
+                    ui.add_space(16.0);
+                    ui.separator();
 
-                    if ui.button("🗑 Clear chat history").clicked() {
+                    if ui
+                        .add_sized(
+                            Vec2::new(ui.available_width(), 34.0),
+                            egui::Button::new("🗑 Clear conversation history"),
+                        )
+                        .clicked()
+                    {
                         self.history.clear();
                         self.pending_response.clear();
                         self.is_streaming = false;
+                        self.copied_idx = None;
                     }
 
-                    ui.add_space(8.0);
+                    ui.add_space(12.0);
                     ui.separator();
 
                     if let AuthState::LoggedIn { models, .. } = &self.auth_state {
-                        ui.label(RichText::new(format!("{} models available", models.len())).color(Color32::from_gray(150)).size(11.0));
+                        ui.label(
+                            RichText::new(format!("{} active live models loaded", models.len()))
+                                .color(Color32::from_gray(140))
+                                .size(11.0),
+                        );
                     }
                 });
         }
 
-        // ── Bottom input bar ──────────────────────────────────────────────────
-        egui::TopBottomPanel::bottom("input_bar").show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let input_edit = egui::TextEdit::multiline(&mut self.input)
-                    .hint_text("Message Gemini… (Enter to send, Shift+Enter for newline)")
-                    .desired_rows(2)
-                    .desired_width(ui.available_width() - 84.0);
+        // ── Bottom Floating Input Area ────────────────────────────────────────
+        egui::TopBottomPanel::bottom("input_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(19, 19, 20))
+                    .inner_margin(egui::Margin::symmetric(24.0, 12.0)),
+            )
+            .show(ctx, |ui| {
+                // Floating input pill container
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(32, 33, 36))
+                    .rounding(Rounding::same(24.0))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 58)))
+                    .inner_margin(egui::Margin::symmetric(18.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let available_w = ui.available_width() - 56.0;
+                            let input_edit = egui::TextEdit::multiline(&mut self.input)
+                                .hint_text("Ask Gemini anything… (Enter to send, Shift+Enter for newline)")
+                                .desired_rows(2)
+                                .desired_width(available_w);
 
-                let response = ui.add(input_edit);
+                            let response = ui.add(input_edit);
 
-                if response.has_focus()
-                    && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                {
-                    self.send_message(ctx.clone());
-                }
+                            if response.has_focus()
+                                && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                            {
+                                self.send_message(ctx.clone());
+                            }
 
-                ui.vertical(|ui| {
-                    let send_label = if self.is_streaming { "⏳" } else { "➤ Send" };
-                    if ui
-                        .add_sized(Vec2::new(74.0, 44.0), egui::Button::new(send_label))
-                        .clicked()
-                    {
-                        self.send_message(ctx.clone());
-                    }
+                            // Send button
+                            let has_text = !self.input.trim().is_empty();
+                            let btn_fill = if self.is_streaming {
+                                Color32::from_rgb(50, 50, 55)
+                            } else if has_text {
+                                Color32::from_rgb(26, 115, 232)
+                            } else {
+                                Color32::from_rgb(45, 46, 50)
+                            };
+
+                            let btn_icon = if self.is_streaming { "⏳" } else { "➤" };
+                            let send_btn = ui.add_sized(
+                                Vec2::new(42.0, 38.0),
+                                egui::Button::new(RichText::new(btn_icon).size(16.0).color(Color32::WHITE))
+                                    .fill(btn_fill)
+                                    .rounding(Rounding::same(20.0)),
+                            );
+
+                            if send_btn.clicked() {
+                                self.send_message(ctx.clone());
+                            }
+                        });
+                    });
+
+                // Disclaimer subtext
+                ui.add_space(4.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("Gemini may display inaccurate info, including about people, so double-check its responses.")
+                            .size(11.0)
+                            .color(Color32::from_gray(120)),
+                    );
                 });
             });
-            ui.add_space(4.0);
-        });
 
-        // ── Chat scroll area ──────────────────────────────────────────────────
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .stick_to_bottom(self.scroll_to_bottom)
-                .show(ui, |ui| {
-                    ui.add_space(8.0);
+        // ── Main Chat Area ────────────────────────────────────────────────────
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(Color32::from_rgb(19, 19, 20)))
+            .show(ctx, |ui| {
+                let scroll = egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .stick_to_bottom(self.scroll_to_bottom);
 
-                    for msg in &self.history {
-                        let is_user = msg.role == Role::User;
-                        draw_bubble(ui, &msg.content, is_user, &mut self.markdown_cache);
-                        ui.add_space(6.0);
+                scroll.show(ui, |ui| {
+                    ui.add_space(16.0);
+
+                    // ── Empty State / Welcome Screen ──────────────────────────
+                    if self.history.is_empty() && !self.is_streaming {
+                        let user_name = if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
+                            tokens.display_name.clone().unwrap_or_else(|| "there".to_string())
+                        } else {
+                            "there".to_string()
+                        };
+                        let first_name = user_name.split_whitespace().next().unwrap_or("there");
+
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(ui.available_height() / 6.0);
+
+                            ui.label(
+                                RichText::new(format!("✦ Hello, {}", first_name))
+                                    .size(36.0)
+                                    .color(Color32::from_rgb(120, 190, 255))
+                                    .strong(),
+                            );
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("How can I help you today?")
+                                    .size(18.0)
+                                    .color(Color32::from_gray(160)),
+                            );
+                            ui.add_space(32.0);
+
+                            // Quick Prompt Cards
+                            let suggestions = [
+                                "🚀 Write a high-performance async Rust microservice with Axum",
+                                "🧠 Explain quantum computing principles in simple terms",
+                                "⚡ Optimize algorithm time and space complexity in Rust",
+                                "📝 Draft a concise technical architecture proposal",
+                            ];
+
+                            for prompt in suggestions {
+                                let card = egui::Frame::none()
+                                    .fill(Color32::from_rgb(28, 29, 32))
+                                    .rounding(Rounding::same(12.0))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 47, 52)))
+                                    .inner_margin(egui::Margin::symmetric(20.0, 12.0));
+
+                                card.show(ui, |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(prompt)
+                                                    .size(13.0)
+                                                    .color(Color32::from_gray(200)),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .clicked()
+                                    {
+                                        self.input = prompt.to_string();
+                                        self.send_message(ctx.clone());
+                                    }
+                                });
+                                ui.add_space(8.0);
+                            }
+                        });
                     }
 
-                    // Live streaming bubble
-                    if self.is_streaming {
-                        if self.pending_response.is_empty() {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(RichText::new("Thinking…").color(Color32::from_gray(150)));
+                    // ── Conversation Messages ─────────────────────────────────
+                    let mut copy_target = None;
+
+                    for (idx, msg) in self.history.iter().enumerate() {
+                        let is_user = msg.role == Role::User;
+                        let is_copied = self.copied_idx == Some(idx);
+
+                        if is_user {
+                            // User Message Bubble (Right-aligned)
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(43, 52, 69))
+                                    .rounding(Rounding::same(16.0))
+                                    .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+                                    .show(ui, |ui| {
+                                        ui.set_max_width(ui.available_width() * 0.72);
+                                        ui.label(RichText::new(&msg.content).size(14.0).color(Color32::WHITE));
+                                    });
                             });
                         } else {
-                            draw_bubble(ui, &self.pending_response.clone(), false, &mut self.markdown_cache);
+                            // Gemini Response Card (Left-aligned)
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(27, 28, 30))
+                                    .rounding(Rounding::same(14.0))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 48)))
+                                    .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                                    .show(ui, |ui| {
+                                        ui.set_max_width(ui.available_width() * 0.85);
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new("✦ Gemini")
+                                                        .size(13.0)
+                                                        .color(Color32::from_rgb(120, 190, 255))
+                                                        .strong(),
+                                                );
+                                            });
+                                            ui.add_space(4.0);
+
+                                            // Markdown Content
+                                            CommonMarkViewer::new().show(
+                                                ui,
+                                                &mut self.markdown_cache,
+                                                &msg.content,
+                                            );
+
+                                            ui.add_space(8.0);
+                                            ui.horizontal(|ui| {
+                                                let copy_label = if is_copied { "Copied! ✓" } else { "📋 Copy" };
+                                                let copy_color = if is_copied {
+                                                    Color32::from_rgb(100, 220, 140)
+                                                } else {
+                                                    Color32::from_gray(160)
+                                                };
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new(copy_label).size(11.0).color(copy_color),
+                                                        )
+                                                        .fill(Color32::from_rgb(38, 40, 44))
+                                                        .rounding(Rounding::same(8.0)),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    copy_target = Some((idx, msg.content.clone()));
+                                                }
+                                            });
+                                        });
+                                    });
+                            });
                         }
+
+                        ui.add_space(10.0);
                     }
 
-                    ui.add_space(8.0);
+                    // Handle Copy Request
+                    if let Some((idx, text)) = copy_target {
+                        ui.output_mut(|o| o.copied_text = text);
+                        self.copied_idx = Some(idx);
+                    }
+
+                    // Live Streaming Bubble
+                    if self.is_streaming {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                            egui::Frame::none()
+                                .fill(Color32::from_rgb(27, 28, 30))
+                                .rounding(Rounding::same(14.0))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 48)))
+                                .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                                .show(ui, |ui| {
+                                    ui.set_max_width(ui.available_width() * 0.85);
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.add_space(6.0);
+                                            ui.label(
+                                                RichText::new("Gemini is generating…")
+                                                    .size(13.0)
+                                                    .color(Color32::from_rgb(120, 190, 255)),
+                                            );
+                                        });
+                                        ui.add_space(6.0);
+                                        if !self.pending_response.is_empty() {
+                                            CommonMarkViewer::new().show(
+                                                ui,
+                                                &mut self.markdown_cache,
+                                                &self.pending_response,
+                                            );
+                                        }
+                                    });
+                                });
+                        });
+                        ui.add_space(10.0);
+                    }
+
+                    ui.add_space(16.0);
                 });
 
-            self.scroll_to_bottom = false;
-        });
+                self.scroll_to_bottom = false;
+            });
     }
-}
-
-fn draw_bubble(ui: &mut egui::Ui, content: &str, is_user: bool, cache: &mut CommonMarkCache) {
-    ui.with_layout(
-        if is_user {
-            egui::Layout::right_to_left(egui::Align::TOP)
-        } else {
-            egui::Layout::left_to_right(egui::Align::TOP)
-        },
-        |ui| {
-            let bubble_color = if is_user {
-                Color32::from_rgb(45, 85, 160)
-            } else {
-                Color32::from_gray(40)
-            };
-
-            egui::Frame::none()
-                .fill(bubble_color)
-                .rounding(Rounding::same(10.0))
-                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                .stroke(Stroke::new(1.0_f32, Color32::from_gray(60)))
-                .show(ui, |ui| {
-                    ui.set_max_width(ui.available_width() * 0.78);
-                    let label = if is_user { "You" } else { "Gemini" };
-                    ui.label(
-                        RichText::new(label)
-                            .font(FontId::proportional(11.0))
-                            .color(Color32::from_gray(170)),
-                    );
-                    if is_user {
-                        ui.label(RichText::new(content).size(14.0));
-                    } else {
-                        CommonMarkViewer::new().show(ui, cache, content);
-                    }
-                });
-        },
-    );
 }
