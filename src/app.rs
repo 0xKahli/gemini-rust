@@ -11,6 +11,41 @@ use tokio::sync::mpsc;
 
 // ── App state ────────────────────────────────────────────────────────────────
 
+fn default_models() -> Vec<ModelInfo> {
+    vec![
+        ModelInfo {
+            name: "models/gemini-2.5-flash".to_string(),
+            display_name: "Gemini 2.5 Flash".to_string(),
+            description: "Fast, versatile multimodal intelligence".to_string(),
+            supported_generation_methods: vec!["generateContent".to_string()],
+        },
+        ModelInfo {
+            name: "models/gemini-2.5-pro".to_string(),
+            display_name: "Gemini 2.5 Pro".to_string(),
+            description: "Advanced reasoning and complex coding".to_string(),
+            supported_generation_methods: vec!["generateContent".to_string()],
+        },
+        ModelInfo {
+            name: "models/gemini-2.0-flash".to_string(),
+            display_name: "Gemini 2.0 Flash".to_string(),
+            description: "High speed, multimodal generation".to_string(),
+            supported_generation_methods: vec!["generateContent".to_string()],
+        },
+        ModelInfo {
+            name: "models/gemini-1.5-flash".to_string(),
+            display_name: "Gemini 1.5 Flash".to_string(),
+            description: "Fast and lightweight".to_string(),
+            supported_generation_methods: vec!["generateContent".to_string()],
+        },
+        ModelInfo {
+            name: "models/gemini-1.5-pro".to_string(),
+            display_name: "Gemini 1.5 Pro".to_string(),
+            description: "Large context reasoning".to_string(),
+            supported_generation_methods: vec!["generateContent".to_string()],
+        },
+    ]
+}
+
 enum AuthState {
     /// Not logged in
     LoggedOut,
@@ -77,7 +112,7 @@ impl GeminiApp {
         let auth_state = match saved {
             Some(tokens) => AuthState::LoggedIn {
                 tokens,
-                models: Vec::new(),
+                models: default_models(),
                 loading_models: true, // will trigger model fetch on first frame
             },
             None => AuthState::LoggedOut,
@@ -194,15 +229,22 @@ impl GeminiApp {
             }
             Some(AuthTaskResult::ModelsLoaded(models)) => {
                 self.auth_rx = None;
-                if let AuthState::LoggedIn { models: m, .. } = &mut self.auth_state {
-                    *m = models;
+                if let AuthState::LoggedIn { models: m, loading_models, .. } = &mut self.auth_state {
+                    *m = if models.is_empty() { default_models() } else { models };
+                    *loading_models = false;
                     self.selected_model_idx = 0;
                 }
             }
             Some(AuthTaskResult::ModelsError(e)) => {
                 self.auth_rx = None;
-                // Non-fatal: keep logged in but show error in settings
                 eprintln!("Models fetch error: {}", e);
+                if let AuthState::LoggedIn { models: m, loading_models, .. } = &mut self.auth_state {
+                    if m.is_empty() {
+                        *m = default_models();
+                    }
+                    *loading_models = false;
+                    self.selected_model_idx = 0;
+                }
             }
             Some(AuthTaskResult::TokenRefreshed(new_tokens)) => {
                 self.auth_rx = None;
@@ -234,9 +276,9 @@ impl GeminiApp {
                 models
                     .get(self.selected_model_idx)
                     .map(|m| m.api_name().to_string())
-                    .unwrap_or_else(|| "gemini-2.0-flash".to_string())
+                    .unwrap_or_else(|| "gemini-2.5-flash".to_string())
             }
-            _ => return,
+            _ => "gemini-2.5-flash".to_string(),
         };
 
         self.history.push(Message::user(&input));
@@ -373,7 +415,7 @@ impl GeminiApp {
 
                 // Model selector from live API list
                 if let AuthState::LoggedIn { models, loading_models, .. } = &self.auth_state {
-                    if *loading_models || models.is_empty() {
+                    if *loading_models && models.is_empty() {
                         ui.spinner();
                         ui.label(RichText::new("Loading models…").color(Color32::from_gray(160)));
                     } else {

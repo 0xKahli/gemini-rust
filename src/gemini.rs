@@ -61,13 +61,28 @@ pub async fn stream_message(
         }
     });
 
-    let response = match request.json(&body).send().await {
+    let mut response = match request.json(&body).send().await {
         Ok(r) => r,
         Err(e) => {
             let _ = tx.send(format!("[Error sending request: {}]", e)).await;
             return;
         }
     };
+
+    // If OAuth token is rejected due to scope permissions, automatically fallback to GEMINI_API_KEY
+    if response.status().as_u16() == 403 {
+        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+            let fallback_url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+                model, key
+            );
+            if let Ok(fallback_resp) = client.post(&fallback_url).json(&body).send().await {
+                if fallback_resp.status().is_success() {
+                    response = fallback_resp;
+                }
+            }
+        }
+    }
 
     if !response.status().is_success() {
         let status = response.status();

@@ -254,12 +254,33 @@ struct ModelsResponse {
 
 pub async fn fetch_available_models(access_token: &str) -> Result<Vec<ModelInfo>, String> {
     let client = Client::new();
-    let resp = client
+    let mut resp = client
         .get("https://generativelanguage.googleapis.com/v1beta/models")
         .bearer_auth(access_token)
         .send()
-        .await
-        .map_err(|e| format!("Request error: {}", e))?;
+        .await;
+
+    // If OAuth token is rejected (e.g. 403 scope insufficient), fall back to GEMINI_API_KEY if available
+    let need_fallback = match &resp {
+        Ok(r) => !r.status().is_success(),
+        Err(_) => true,
+    };
+
+    if need_fallback {
+        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+            if let Ok(api_resp) = client
+                .get(format!("https://generativelanguage.googleapis.com/v1beta/models?key={}", key))
+                .send()
+                .await
+            {
+                if api_resp.status().is_success() {
+                    resp = Ok(api_resp);
+                }
+            }
+        }
+    }
+
+    let resp = resp.map_err(|e| format!("Request error: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
