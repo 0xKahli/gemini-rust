@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 pub enum AuthMethod {
+    #[allow(dead_code)]
     ApiKey(String),
     Bearer(String),
 }
@@ -17,20 +18,22 @@ pub async fn stream_message(
 ) {
     let client = Client::new();
 
-    let (url, request) = match &auth {
+    let (_url, request) = match &auth {
         AuthMethod::ApiKey(key) => {
             let url = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
                 model, key
             );
-            (url, client.post(&url))
+            let req = client.post(&url);
+            (url, req)
         }
         AuthMethod::Bearer(token) => {
             let url = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse",
                 model
             );
-            (url.clone(), client.post(&url).bearer_auth(token))
+            let req = client.post(&url).bearer_auth(token);
+            (url, req)
         }
     };
 

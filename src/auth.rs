@@ -5,8 +5,7 @@ use oauth2::{
     TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use reqwest::Client;
+use std::sync::Arc;use reqwest::Client;
 
 // Loaded at runtime from GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET env vars,
 // or falling back to a bundled default for personal builds.

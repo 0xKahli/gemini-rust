@@ -36,11 +36,13 @@ pub struct GeminiApp {
     selected_model_idx: usize,
     system_prompt: String,
     show_settings: bool,
+    #[allow(dead_code)]
     show_system_prompt: bool,
 
     // Streaming
     runtime: Arc<tokio::runtime::Runtime>,
     // Channels for auth tasks
+    #[allow(dead_code)]
     auth_tx: Option<mpsc::Sender<AuthTaskResult>>,
     auth_rx: Option<mpsc::Receiver<AuthTaskResult>>,
     // Channels for chat streaming
@@ -403,12 +405,14 @@ impl GeminiApp {
                             .display_name
                             .as_deref()
                             .or(tokens.email.as_deref())
-                            .unwrap_or("Account");
+                            .unwrap_or("Account")
+                            .to_string();
+                        let email = tokens.email.clone();
 
                         ui.menu_button(format!("👤 {}", name), |ui| {
                             ui.set_min_width(160.0);
-                            if let Some(email) = &tokens.email {
-                                ui.label(RichText::new(email).color(Color32::from_gray(160)).size(11.0));
+                            if let Some(ref e) = email {
+                                ui.label(RichText::new(e).color(Color32::from_gray(160)).size(11.0));
                                 ui.separator();
                             }
                             if ui.button("⚙ Settings").clicked() {
@@ -544,7 +548,7 @@ fn draw_bubble(ui: &mut egui::Ui, content: &str, is_user: bool, cache: &mut Comm
                 .fill(bubble_color)
                 .rounding(Rounding::same(10.0))
                 .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                .stroke(Stroke::new(1.0, Color32::from_gray(60)))
+                .stroke(Stroke::new(1.0_f32, Color32::from_gray(60)))
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width() * 0.78);
                     let label = if is_user { "You" } else { "Gemini" };

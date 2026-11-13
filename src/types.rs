@@ -7,6 +7,7 @@ pub enum Role {
 }
 
 impl Role {
+    #[allow(dead_code)]
     pub fn label(&self) -> &str {
         match self {
             Role::User => "You",
