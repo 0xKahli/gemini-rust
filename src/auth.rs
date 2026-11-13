@@ -137,6 +137,34 @@ pub fn clear_tokens() {
     }
 }
 
+pub fn load_is_pro_plan() -> bool {
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(env) = hkcu.open_subkey("Environment") {
+            if let Ok(val) = env.get_value::<String, _>("GEMINI_IS_PRO_PLAN") {
+                return val == "1" || val.to_lowercase() == "true";
+            }
+        }
+    }
+    false
+}
+
+pub fn save_is_pro_plan(is_pro: bool) {
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(env) = hkcu.open_subkey_with_flags("Environment", KEY_WRITE) {
+            let val = if is_pro { "1" } else { "0" };
+            let _ = env.set_value("GEMINI_IS_PRO_PLAN", &val);
+        }
+    }
+}
+
 fn make_oauth_client() -> BasicClient {
     BasicClient::new(
         ClientId::new(client_id()),
@@ -306,7 +334,7 @@ struct ModelsResponse {
     models: Option<Vec<ModelInfo>>,
 }
 
-pub async fn fetch_available_models(access_token: &str) -> Result<Vec<ModelInfo>, String> {
+pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<Vec<ModelInfo>, String> {
     let client = Client::new();
     let mut resp = client
         .get("https://generativelanguage.googleapis.com/v1beta/models")
@@ -363,27 +391,55 @@ pub async fn fetch_available_models(access_token: &str) -> Result<Vec<ModelInfo>
         })
         .collect();
 
+    if is_pro {
+        // If Pro plan is active, ensure Gemini 4 is included at the top
+        let has_gemini_4 = models.iter().any(|m| m.name.contains("gemini-4"));
+        if !has_gemini_4 {
+            models.insert(
+                0,
+                ModelInfo {
+                    name: "models/gemini-4-argon".to_string(),
+                    display_name: "✦ Gemini 4 (Pro)".to_string(),
+                    description: "Next-generation Gemini 4 frontier model (Requires Gemini Pro Plan)".to_string(),
+                    supported_generation_methods: vec!["generateContent".to_string()],
+                },
+            );
+        } else {
+            // Give Gemini 4 a distinct Pro badge
+            for m in &mut models {
+                if m.name.contains("gemini-4") && !m.display_name.contains("✦") {
+                    m.display_name = format!("✦ {} (Pro)", m.display_name);
+                }
+            }
+        }
+    } else {
+        // Filter out Gemini 4 for free tier
+        models.retain(|m| !m.name.contains("gemini-4"));
+    }
+
     // Prioritize flagship Gemini chat models to match the official Gemini experience
     models.sort_by_key(|m| {
         let n = m.name.to_lowercase();
-        if n.contains("gemini-2.5-flash") && !n.contains("lite") {
+        if n.contains("gemini-4") {
             0
-        } else if n.contains("gemini-2.5-pro") {
+        } else if n.contains("gemini-2.5-flash") && !n.contains("lite") {
             1
-        } else if n.contains("gemini-3.8-flash") {
+        } else if n.contains("gemini-2.5-pro") {
             2
-        } else if n.contains("gemini-3.1-pro") {
+        } else if n.contains("gemini-3.8-flash") {
             3
-        } else if n.contains("gemini-3.7-flash") {
+        } else if n.contains("gemini-3.1-pro") {
             4
-        } else if n.contains("gemini-3.5-flash") {
+        } else if n.contains("gemini-3.7-flash") {
             5
-        } else if n.contains("gemini-flash-latest") {
+        } else if n.contains("gemini-3.5-flash") {
             6
-        } else if n.contains("gemini-pro-latest") {
+        } else if n.contains("gemini-flash-latest") {
             7
-        } else if n.contains("gemini-2.5-flash-lite") {
+        } else if n.contains("gemini-pro-latest") {
             8
+        } else if n.contains("gemini-2.5-flash-lite") {
+            9
         } else {
             50
         }

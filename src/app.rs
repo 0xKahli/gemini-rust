@@ -1,6 +1,6 @@
 use crate::auth::{
-    clear_tokens, fetch_available_models, get_gemini_api_key, load_tokens, refresh_access_token,
-    start_login_flow, ModelInfo, TokenStore,
+    clear_tokens, fetch_available_models, get_gemini_api_key, load_is_pro_plan, load_tokens,
+    refresh_access_token, save_is_pro_plan, start_login_flow, ModelInfo, TokenStore,
 };
 use crate::gemini::{stream_message, AuthMethod};
 use crate::types::{Message, Role};
@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 
 // ── App state ────────────────────────────────────────────────────────────────
 
-fn default_models() -> Vec<ModelInfo> {
-    vec![
+fn default_models(is_pro: bool) -> Vec<ModelInfo> {
+    let mut list = vec![
         ModelInfo {
             name: "models/gemini-2.5-flash".to_string(),
             display_name: "Gemini 2.5 Flash".to_string(),
@@ -55,7 +55,21 @@ fn default_models() -> Vec<ModelInfo> {
             description: "Lightweight, super-fast model for simple questions".to_string(),
             supported_generation_methods: vec!["generateContent".to_string()],
         },
-    ]
+    ];
+
+    if is_pro {
+        list.insert(
+            0,
+            ModelInfo {
+                name: "models/gemini-4-argon".to_string(),
+                display_name: "✦ Gemini 4 (Pro)".to_string(),
+                description: "Next-generation Gemini 4 frontier model (Requires Gemini Pro Plan)".to_string(),
+                supported_generation_methods: vec!["generateContent".to_string()],
+            },
+        );
+    }
+
+    list
 }
 
 enum AuthState {
@@ -74,8 +88,9 @@ enum AuthState {
 }
 
 pub struct GeminiApp {
-    // Auth
+    // Auth & Plan
     auth_state: AuthState,
+    is_pro_plan: bool,
 
     // Chat
     history: Vec<Message>,
@@ -119,12 +134,14 @@ impl GeminiApp {
                 .expect("Failed to create Tokio runtime"),
         );
 
+        let is_pro_plan = load_is_pro_plan();
+
         // Try loading saved tokens from keychain
         let saved = load_tokens();
         let auth_state = match saved {
             Some(tokens) => AuthState::LoggedIn {
                 tokens,
-                models: default_models(),
+                models: default_models(is_pro_plan),
                 loading_models: true, // will trigger model fetch on first frame
             },
             None => AuthState::LoggedOut,
@@ -132,6 +149,7 @@ impl GeminiApp {
 
         Self {
             auth_state,
+            is_pro_plan,
             history: Vec::new(),
             input: String::new(),
             selected_model_idx: 0,
@@ -173,8 +191,9 @@ impl GeminiApp {
         let (tx, rx) = mpsc::channel::<AuthTaskResult>(4);
         self.auth_rx = Some(rx);
         let access_token = tokens.access_token.clone();
+        let is_pro = self.is_pro_plan;
         self.runtime.spawn(async move {
-            match fetch_available_models(&access_token).await {
+            match fetch_available_models(&access_token, is_pro).await {
                 Ok(models) => {
                     let _ = tx.send(AuthTaskResult::ModelsLoaded(models)).await;
                 }
@@ -184,6 +203,19 @@ impl GeminiApp {
             }
             ctx.request_repaint();
         });
+    }
+
+    fn set_pro_plan(&mut self, is_pro: bool, ctx: egui::Context) {
+        self.is_pro_plan = is_pro;
+        save_is_pro_plan(is_pro);
+        if let AuthState::LoggedIn { models, tokens, loading_models } = &mut self.auth_state {
+            *models = default_models(is_pro);
+            *loading_models = true;
+            self.selected_model_idx = 0;
+            let tokens_clone = tokens.clone();
+            self.fetch_models(tokens_clone, ctx.clone());
+        }
+        ctx.request_repaint();
     }
 
     fn refresh_token_if_needed(&mut self, ctx: egui::Context) {
@@ -230,7 +262,7 @@ impl GeminiApp {
                 self.auth_rx = None;
                 self.auth_state = AuthState::LoggedIn {
                     tokens: tokens.clone(),
-                    models: Vec::new(),
+                    models: default_models(self.is_pro_plan),
                     loading_models: false,
                 };
                 self.fetch_models(tokens, ctx_clone);
@@ -242,7 +274,7 @@ impl GeminiApp {
             Some(AuthTaskResult::ModelsLoaded(models)) => {
                 self.auth_rx = None;
                 if let AuthState::LoggedIn { models: m, loading_models, .. } = &mut self.auth_state {
-                    *m = if models.is_empty() { default_models() } else { models };
+                    *m = if models.is_empty() { default_models(self.is_pro_plan) } else { models };
                     *loading_models = false;
                     self.selected_model_idx = 0;
                 }
@@ -252,7 +284,7 @@ impl GeminiApp {
                 eprintln!("Models fetch error: {}", e);
                 if let AuthState::LoggedIn { models: m, loading_models, .. } = &mut self.auth_state {
                     if m.is_empty() {
-                        *m = default_models();
+                        *m = default_models(self.is_pro_plan);
                     }
                     *loading_models = false;
                     self.selected_model_idx = 0;
@@ -468,11 +500,14 @@ impl GeminiApp {
                         let email = tokens.email.clone();
 
                         ui.menu_button(format!("👤 {}", name), |ui| {
-                            ui.set_min_width(160.0);
+                            ui.set_min_width(180.0);
                             if let Some(ref e) = email {
                                 ui.label(RichText::new(e).color(Color32::from_gray(160)).size(11.0));
                                 ui.separator();
                             }
+                            let plan_label = if self.is_pro_plan { "✦ Gemini Pro Plan" } else { "Free Tier Plan" };
+                            ui.label(RichText::new(plan_label).color(Color32::from_rgb(100, 180, 255)).strong().size(12.0));
+                            ui.separator();
                             if ui.button("⚙ Settings").clicked() {
                                 self.show_settings = !self.show_settings;
                                 ui.close_menu();
@@ -485,6 +520,16 @@ impl GeminiApp {
                                 ui.close_menu();
                             }
                         });
+
+                        // Plan badge pill button
+                        let badge = if self.is_pro_plan {
+                            RichText::new("✦ PRO").color(Color32::from_rgb(255, 215, 80)).strong().size(12.0)
+                        } else {
+                            RichText::new("FREE").color(Color32::from_gray(160)).size(11.0)
+                        };
+                        if ui.button(badge).on_hover_text("Click to configure plan tier in Settings").clicked() {
+                            self.show_settings = true;
+                        }
                     }
                 });
             });
@@ -497,6 +542,34 @@ impl GeminiApp {
                 .default_width(280.0)
                 .show(ctx, |ui| {
                     ui.heading("Settings");
+                    ui.separator();
+
+                    ui.label(RichText::new("Plan Tier:").strong());
+                    let mut changed_plan = None;
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(!self.is_pro_plan, "Free Tier").clicked() {
+                            if self.is_pro_plan {
+                                changed_plan = Some(false);
+                            }
+                        }
+                        if ui.selectable_label(self.is_pro_plan, "✦ Gemini Pro").clicked() {
+                            if !self.is_pro_plan {
+                                changed_plan = Some(true);
+                            }
+                        }
+                    });
+
+                    if let Some(new_plan) = changed_plan {
+                        self.set_pro_plan(new_plan, ctx.clone());
+                    }
+
+                    if self.is_pro_plan {
+                        ui.colored_label(Color32::from_rgb(100, 220, 140), "✔ Gemini 4 unlocked");
+                    } else {
+                        ui.label(RichText::new("Select '✦ Gemini Pro' to unlock Gemini 4 models").color(Color32::from_gray(150)).size(11.0));
+                    }
+
+                    ui.add_space(8.0);
                     ui.separator();
 
                     ui.label("System Prompt:");
