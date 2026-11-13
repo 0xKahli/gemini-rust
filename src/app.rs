@@ -1759,59 +1759,67 @@ impl GeminiApp {
                     .inner_margin(egui::Margin::symmetric(24.0, 12.0)),
             )
             .show(ctx, |ui| {
-                // Single Unified Floating Chat Box
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(30, 31, 35))
-                    .rounding(Rounding::same(24.0))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 55, 62)))
-                    .inner_margin(egui::Margin::symmetric(18.0, 10.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let available_w = (ui.available_width() - 48.0).max(100.0);
+                let max_pill_w = 820.0_f32;
+                let pill_w = ui.available_width().min(max_pill_w);
 
-                            let (has_text, is_streaming) = if let Some(tab) = self.active_tab_mut() {
-                                let input_edit = egui::TextEdit::multiline(&mut tab.input)
-                                    .hint_text("Ask Gemini anything…")
-                                    .frame(false)
-                                    .margin(egui::Margin::symmetric(0.0, 2.0))
-                                    .desired_rows(2)
-                                    .desired_width(available_w);
+                ui.vertical_centered(|ui| {
+                    ui.set_width(pill_w);
 
-                                let response = ui.add(input_edit);
+                    // Single Unified Floating Chat Box (Centered)
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(30, 31, 35))
+                        .rounding(Rounding::same(24.0))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 55, 62)))
+                        .inner_margin(egui::Margin::symmetric(18.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let available_w = (ui.available_width() - 44.0).max(100.0);
 
-                                if response.has_focus()
-                                    && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                                {
+                                let (has_text, is_streaming) = if let Some(tab) = self.active_tab_mut() {
+                                    let input_edit = egui::TextEdit::multiline(&mut tab.input)
+                                        .hint_text("Ask Gemini anything…")
+                                        .frame(false)
+                                        .vertical_align(egui::Align::Center)
+                                        .horizontal_align(egui::Align::Center)
+                                        .desired_rows(1)
+                                        .desired_width(available_w);
+
+                                    let response = ui.add(input_edit);
+
+                                    if response.has_focus()
+                                        && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                                    {
+                                        should_send = true;
+                                    }
+
+                                    (!tab.input.trim().is_empty(), tab.is_streaming)
+                                } else {
+                                    (false, false)
+                                };
+
+                                // Send button
+                                let (btn_fill, btn_color) = if is_streaming {
+                                    (Color32::from_rgb(45, 47, 52), Color32::from_gray(180))
+                                } else if has_text {
+                                    (Color32::from_rgb(26, 115, 232), Color32::WHITE)
+                                } else {
+                                    (Color32::from_rgb(38, 40, 45), Color32::from_gray(130))
+                                };
+
+                                let btn_icon = if is_streaming { "⏳" } else { "➤" };
+                                let send_btn = ui.add_sized(
+                                    Vec2::new(36.0, 34.0),
+                                    egui::Button::new(RichText::new(btn_icon).size(15.0).color(btn_color))
+                                        .fill(btn_fill)
+                                        .rounding(Rounding::same(17.0)),
+                                ).on_hover_text("Send message (Enter)");
+
+                                if send_btn.clicked() {
                                     should_send = true;
                                 }
-
-                                (!tab.input.trim().is_empty(), tab.is_streaming)
-                            } else {
-                                (false, false)
-                            };
-
-                            // Send button
-                            let (btn_fill, btn_color) = if is_streaming {
-                                (Color32::from_rgb(45, 47, 52), Color32::from_gray(180))
-                            } else if has_text {
-                                (Color32::from_rgb(26, 115, 232), Color32::WHITE)
-                            } else {
-                                (Color32::from_rgb(38, 40, 45), Color32::from_gray(130))
-                            };
-
-                            let btn_icon = if is_streaming { "⏳" } else { "➤" };
-                            let send_btn = ui.add_sized(
-                                Vec2::new(36.0, 34.0),
-                                egui::Button::new(RichText::new(btn_icon).size(15.0).color(btn_color))
-                                    .fill(btn_fill)
-                                    .rounding(Rounding::same(17.0)),
-                            ).on_hover_text("Send message (Enter)");
-
-                            if send_btn.clicked() {
-                                should_send = true;
-                            }
+                            });
                         });
-                    });
+                });
 
                 // Disclaimer subtext
                 ui.add_space(4.0);
