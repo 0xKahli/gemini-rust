@@ -1970,17 +1970,32 @@ impl GeminiApp {
                                         .hint_text("Chat with Gemini…")
                                         .frame(false)
                                         .desired_rows(1)
-                                        .desired_width(available_w);
+                                        .desired_width(available_w)
+                                        .return_key(Some(egui::KeyboardShortcut::new(
+                                            egui::Modifiers::SHIFT,
+                                            egui::Key::Enter,
+                                        )));
 
                                     let response = ui.add(input_edit);
 
-                                    if response.has_focus()
-                                        && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                                    {
+                                    let enter_pressed = ctx.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
+                                    });
+
+                                    if (response.has_focus() || response.lost_focus()) && enter_pressed {
+                                        if tab.input.ends_with('\n') {
+                                            tab.input.pop();
+                                            if tab.input.ends_with('\r') {
+                                                tab.input.pop();
+                                            }
+                                        }
+
                                         if tab.input.trim().is_empty() && tab.attached_files.is_empty() {
                                             tab.input.clear();
-                                        } else {
+                                        } else if !tab.is_streaming {
                                             should_send = true;
+                                            response.request_focus();
                                         }
                                     }
 
