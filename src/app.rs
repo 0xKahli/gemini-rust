@@ -1334,25 +1334,40 @@ impl GeminiApp {
 
                             ui.add_space(16.0);
 
-                            // ── Divider ──────────────────────────────────
-                            ui.horizontal(|ui| {
-                                let w = (ui.available_width() - 320.0).max(0.0) / 2.0;
-                                ui.add_space(w);
-                                ui.set_width(320.0);
-                                ui.columns(3, |cols| {
-                                    cols[0].vertical_centered(|ui| {
-                                        ui.add_space(8.0);
-                                        ui.separator();
-                                    });
-                                    cols[1].vertical_centered(|ui| {
-                                        ui.label(RichText::new("OR").color(theme.text_muted).size(12.0).strong());
-                                    });
-                                    cols[2].vertical_centered(|ui| {
-                                        ui.add_space(8.0);
-                                        ui.separator();
-                                    });
-                                });
-                            });
+                            // ── Centered Divider (Exactly matches 320px width of buttons & card) ──
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(320.0, 24.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                                    let line_w = (320.0 - 44.0) / 2.0;
+
+                                    // Left subtle line
+                                    let (l_rect, _) = ui.allocate_exact_size(Vec2::new(line_w, 20.0), egui::Sense::hover());
+                                    ui.painter().line_segment(
+                                        [l_rect.left_center(), l_rect.right_center()],
+                                        Stroke::new(1.0_f32, theme.border_subtle),
+                                    );
+
+                                    // Center "OR" label
+                                    ui.add_sized(
+                                        Vec2::new(44.0, 20.0),
+                                        egui::Label::new(
+                                            RichText::new("OR")
+                                                .color(theme.text_muted)
+                                                .size(11.5)
+                                                .strong(),
+                                        ),
+                                    );
+
+                                    // Right subtle line
+                                    let (r_rect, _) = ui.allocate_exact_size(Vec2::new(line_w, 20.0), egui::Sense::hover());
+                                    ui.painter().line_segment(
+                                        [r_rect.left_center(), r_rect.right_center()],
+                                        Stroke::new(1.0_f32, theme.border_subtle),
+                                    );
+                                },
+                            );
 
                             ui.add_space(16.0);
 
