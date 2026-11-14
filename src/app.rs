@@ -241,6 +241,7 @@ pub struct GeminiApp {
     confirm_delete_id: Option<String>,
     sparkle_texture: Option<egui::TextureHandle>,
     latex_cache: crate::latex::LatexCache,
+    v_key_was_down: bool,
 
     // Runtime & async channels
     runtime: Arc<tokio::runtime::Runtime>,
@@ -326,6 +327,7 @@ impl GeminiApp {
             confirm_delete_id: None,
             sparkle_texture: None,
             latex_cache: crate::latex::LatexCache::new(),
+            v_key_was_down: false,
             runtime,
             auth_rx: None,
         }
@@ -368,45 +370,64 @@ impl GeminiApp {
         }
     }
 
-    /// Attempts to read an image from the system clipboard and attach it.
+    /// Attempts to read an image or copied image files from the system clipboard and attach them.
     /// Returns true if an image was found and successfully attached.
     pub fn try_paste_image_from_clipboard(&mut self, ctx: &egui::Context) -> bool {
-        let mut clipboard = match arboard::Clipboard::new() {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        let img = match clipboard.get_image() {
-            Ok(i) => i,
-            Err(_) => return false,
-        };
-
-        let width = img.width as u32;
-        let height = img.height as u32;
-        if width == 0 || height == 0 {
-            return false;
-        }
-
-        let raw_bytes = img.bytes.into_owned();
-        if let Some(rgba) = image::RgbaImage::from_raw(width, height, raw_bytes) {
-            let mut png_buf = std::io::Cursor::new(Vec::new());
-            if rgba.write_to(&mut png_buf, image::ImageFormat::Png).is_ok() {
-                let png_bytes = png_buf.into_inner();
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-                let file_name = format!("clipboard_{}.png", chrono::Local::now().format("%H%M%S"));
-                let att = AttachedFile {
-                    file_name,
-                    mime_type: "image/png".to_string(),
-                    size_bytes: png_bytes.len(),
-                    data_base64: b64,
-                };
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.attached_files.push(att);
-                    ctx.request_repaint();
-                    return true;
+        // 1. Try reading raw pixel image from clipboard (e.g. Snipping tool, screenshots, Copy Image)
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            if let Ok(img) = clipboard.get_image() {
+                let width = img.width as u32;
+                let height = img.height as u32;
+                if width > 0 && height > 0 {
+                    let raw_bytes = img.bytes.into_owned();
+                    if let Some(rgba) = image::RgbaImage::from_raw(width, height, raw_bytes) {
+                        let mut png_buf = std::io::Cursor::new(Vec::new());
+                        if rgba.write_to(&mut png_buf, image::ImageFormat::Png).is_ok() {
+                            let png_bytes = png_buf.into_inner();
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+                            let file_name = format!("clipboard_{}.png", chrono::Local::now().format("%H%M%S"));
+                            let att = AttachedFile {
+                                file_name,
+                                mime_type: "image/png".to_string(),
+                                size_bytes: png_bytes.len(),
+                                data_base64: b64,
+                            };
+                            if let Some(tab) = self.active_tab_mut() {
+                                tab.attached_files.push(att);
+                                ctx.request_repaint();
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        // 2. On Windows, check if the clipboard contains copied image files (e.g. from File Explorer)
+        #[cfg(target_os = "windows")]
+        {
+            let files = try_get_clipboard_files();
+            let mut attached_any = false;
+            for path in files {
+                let is_image = path.extension().map_or(false, |ext| {
+                    let e = ext.to_string_lossy().to_lowercase();
+                    matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "svg")
+                });
+                if is_image {
+                    if let Ok(att) = load_attachment_from_path(&path) {
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.attached_files.push(att);
+                            attached_any = true;
+                        }
+                    }
+                }
+            }
+            if attached_any {
+                ctx.request_repaint();
+                return true;
+            }
+        }
+
         false
     }
 
@@ -932,6 +953,73 @@ impl GeminiApp {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn check_windows_ctrl_v(v_was_down: &mut bool) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(v_key: i32) -> i16;
+    }
+
+    const VK_CONTROL: i32 = 0x11;
+    const VK_V: i32 = 0x56;
+
+    let ctrl_down = unsafe { (GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000) != 0 };
+    let v_down = unsafe { (GetAsyncKeyState(VK_V) as u16 & 0x8000) != 0 };
+
+    let just_pressed = ctrl_down && v_down && !*v_was_down;
+    *v_was_down = v_down;
+    just_pressed
+}
+
+#[cfg(target_os = "windows")]
+fn try_get_clipboard_files() -> Vec<std::path::PathBuf> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn OpenClipboard(hwnd: *mut std::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(u_format: u32) -> *mut std::ffi::c_void;
+        fn IsClipboardFormatAvailable(format: u32) -> i32;
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn DragQueryFileW(
+            hdrop: *mut std::ffi::c_void,
+            ifile: u32,
+            lpsz_file: *mut u16,
+            cch: u32,
+        ) -> u32;
+    }
+
+    const CF_HDROP: u32 = 15;
+
+    let mut result = Vec::new();
+    unsafe {
+        if IsClipboardFormatAvailable(CF_HDROP) == 0 {
+            return result;
+        }
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return result;
+        }
+        let hdrop = GetClipboardData(CF_HDROP);
+        if !hdrop.is_null() {
+            let count = DragQueryFileW(hdrop, 0xFFFFFFFF, std::ptr::null_mut(), 0);
+            for i in 0..count {
+                let len = DragQueryFileW(hdrop, i, std::ptr::null_mut(), 0) as usize;
+                if len > 0 {
+                    let mut buf = vec![0u16; len + 1];
+                    DragQueryFileW(hdrop, i, buf.as_mut_ptr(), (len + 1) as u32);
+                    buf.pop(); // remove null terminator
+                    let path_str = String::from_utf16_lossy(&buf);
+                    result.push(std::path::PathBuf::from(path_str));
+                }
+            }
+        }
+        CloseClipboard();
+    }
+    result
+}
+
 // ── Application UI ───────────────────────────────────────────────────────────
 
 impl eframe::App for GeminiApp {
@@ -963,12 +1051,31 @@ impl eframe::App for GeminiApp {
         if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::O)) {
             self.pick_and_attach_files();
         }
-        // Ctrl+V: Paste Image from Clipboard
-        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V)) {
+        // Ctrl+V: Paste Image/Files from Clipboard
+        let ctrl_v_pressed = {
+            let egui_paste = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V));
+            #[cfg(target_os = "windows")]
+            {
+                let win_paste = if ctx.input(|i| i.focused) {
+                    check_windows_ctrl_v(&mut self.v_key_was_down)
+                } else {
+                    self.v_key_was_down = false;
+                    false
+                };
+                egui_paste || win_paste
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                egui_paste
+            }
+        };
+
+        if ctrl_v_pressed {
             if self.try_paste_image_from_clipboard(ctx) {
                 ctx.input_mut(|i| {
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
                     i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
+                    i.events.retain(|e| !matches!(e, egui::Event::Paste(_)));
                 });
             }
         }
@@ -2154,10 +2261,16 @@ impl GeminiApp {
                     .stick_to_bottom(scroll_to_bottom);
 
                 scroll.show(ui, |ui| {
-                    ui.add_space(16.0);
-
-                    // ── Empty State / Clean Gemini Welcome Screen ─────────────
-                    if is_empty && !is_streaming {
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin {
+                            left: 32.0,
+                            right: 32.0,
+                            top: 16.0,
+                            bottom: 24.0,
+                        })
+                        .show(ui, |ui| {
+                            // ── Empty State / Clean Gemini Welcome Screen ─────────────
+                            if is_empty && !is_streaming {
                         let user_name = if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
                             tokens.display_name.clone().unwrap_or_else(|| "there".to_string())
                         } else {
@@ -2244,7 +2357,7 @@ impl GeminiApp {
                                     egui::Frame::none()
                                         .fill(Color32::from_rgb(43, 52, 69))
                                         .rounding(Rounding::same(16.0))
-                                        .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                                        .inner_margin(egui::Margin::symmetric(18.0, 12.0))
                                         .show(ui, |ui| {
                                             ui.set_width(inner_w);
                                             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
@@ -2283,9 +2396,9 @@ impl GeminiApp {
                                         .fill(Color32::from_rgb(27, 28, 30))
                                         .rounding(Rounding::same(14.0))
                                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 48)))
-                                        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                                        .inner_margin(egui::Margin::symmetric(22.0, 16.0))
                                         .show(ui, |ui| {
-                                            ui.set_max_width(ui.available_width() * 0.85);
+                                            ui.set_max_width(ui.available_width() * 0.88);
                                             ui.vertical(|ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label(
@@ -2347,7 +2460,7 @@ impl GeminiApp {
                                 });
                             }
 
-                            ui.add_space(10.0);
+                            ui.add_space(14.0);
                         }
 
                         // Live Streaming Bubble
@@ -2357,9 +2470,9 @@ impl GeminiApp {
                                     .fill(Color32::from_rgb(27, 28, 30))
                                     .rounding(Rounding::same(14.0))
                                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 48)))
-                                    .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                                    .inner_margin(egui::Margin::symmetric(22.0, 16.0))
                                     .show(ui, |ui| {
-                                        ui.set_max_width(ui.available_width() * 0.85);
+                                        ui.set_max_width(ui.available_width() * 0.88);
                                         ui.vertical(|ui| {
                                             ui.horizontal(|ui| {
                                                 ui.spinner();
@@ -2383,11 +2496,12 @@ impl GeminiApp {
                                         });
                                     });
                             });
-                            ui.add_space(10.0);
+                            ui.add_space(14.0);
                         }
                     }
 
-                    ui.add_space(16.0);
+                    ui.add_space(8.0);
+                        });
                 });
 
                 if let Some(tab) = self.active_tab_mut() {
