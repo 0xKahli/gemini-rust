@@ -1873,8 +1873,12 @@ impl GeminiApp {
                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 43, 46))),
                 )
                 .resizable(true)
-                .default_width(300.0)
+                .default_width(320.0)
+                .width_range(280.0..=420.0)
                 .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading(RichText::new("⚙️ Settings").color(Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1939,10 +1943,11 @@ impl GeminiApp {
 
                     let mut current_input = if self.api_key_input.is_empty() { active_key.clone() } else { self.api_key_input.clone() };
                     ui.horizontal(|ui| {
+                        let avail_edit_w = (ui.available_width() - 36.0).max(120.0);
                         let edit = egui::TextEdit::singleline(&mut current_input)
                             .password(!self.show_api_key_text)
                             .hint_text("Paste key (AIzaSy…)")
-                            .desired_width(ui.available_width() - 40.0);
+                            .desired_width(avail_edit_w);
                         if ui.add(edit).changed() {
                             self.api_key_input = current_input.clone();
                         }
@@ -1977,11 +1982,12 @@ impl GeminiApp {
                     ui.separator();
 
                     ui.label(RichText::new("🧠 System Instructions").strong().color(Color32::WHITE));
+                    let avail_sys_w = ui.available_width();
                     ui.add(
                         egui::TextEdit::multiline(&mut self.system_prompt)
                             .hint_text("Optional persona or guidelines for Gemini…")
                             .desired_rows(5)
-                            .desired_width(f32::INFINITY),
+                            .desired_width(avail_sys_w),
                     );
 
                     ui.add_space(16.0);
@@ -2051,7 +2057,7 @@ impl GeminiApp {
                                 ui.hyperlink_to(
                                     RichText::new("github.com/0xKahli/gemini-rust").size(10.5).color(Color32::from_rgb(100, 180, 255)),
                                     "https://github.com/0xKahli/gemini-rust",
-                                ).on_hover_text("https://github.com/0xKahli/gemini-rust");
+                                );
                             });
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
@@ -2059,10 +2065,11 @@ impl GeminiApp {
                                 ui.hyperlink_to(
                                     RichText::new("rusty-gemini.vercel.app").size(10.5).color(Color32::from_rgb(100, 180, 255)),
                                     "https://rusty-gemini.vercel.app",
-                                ).on_hover_text("https://rusty-gemini.vercel.app");
+                                );
                             });
                         });
-                });
+                    }); // end ScrollArea
+                }); // end SidePanel show
         }
 
         // ── History Sidebar (Previous Conversations) ──────────────────────────
