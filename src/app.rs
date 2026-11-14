@@ -4,8 +4,8 @@ use crate::auth::{
 };
 use crate::gemini::{stream_message, AuthMethod};
 use crate::storage::{
-    load_conversations, load_session, save_session, SavedSessionState, SavedTabState,
-    StoredConversation,
+    load_conversations, load_session, load_theme_preference, save_session,
+    save_theme_preference, SavedSessionState, SavedTabState, StoredConversation,
 };
 use base64::Engine;
 use crate::types::{guess_mime_type, AttachedFile, Message, Role};
@@ -217,6 +217,80 @@ enum AuthState {
     Error(String),
 }
 
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+pub struct ThemeColors {
+    pub is_dark: bool,
+    pub bg_app: Color32,
+    pub bg_top_bar: Color32,
+    pub bg_sidebar: Color32,
+    pub bg_settings: Color32,
+    pub bg_card: Color32,
+    pub bg_user_bubble: Color32,
+    pub bg_gemini_bubble: Color32,
+    pub bg_input: Color32,
+    pub bg_button: Color32,
+    pub bg_button_hover: Color32,
+    pub bg_active_tab: Color32,
+    pub bg_inactive_tab: Color32,
+    pub border_subtle: Color32,
+    pub border_focus: Color32,
+    pub text_primary: Color32,
+    pub text_secondary: Color32,
+    pub text_muted: Color32,
+    pub accent: Color32,
+}
+
+impl ThemeColors {
+    pub fn dark() -> Self {
+        Self {
+            is_dark: true,
+            bg_app: Color32::from_rgb(19, 19, 20),
+            bg_top_bar: Color32::from_rgb(27, 28, 29),
+            bg_sidebar: Color32::from_rgb(22, 23, 26),
+            bg_settings: Color32::from_rgb(27, 28, 29),
+            bg_card: Color32::from_rgb(29, 31, 35),
+            bg_user_bubble: Color32::from_rgb(43, 52, 69),
+            bg_gemini_bubble: Color32::from_rgb(27, 28, 30),
+            bg_input: Color32::from_rgb(30, 31, 35),
+            bg_button: Color32::from_rgb(34, 35, 38),
+            bg_button_hover: Color32::from_rgb(45, 47, 52),
+            bg_active_tab: Color32::from_rgb(34, 36, 42),
+            bg_inactive_tab: Color32::from_rgb(25, 26, 29),
+            border_subtle: Color32::from_rgb(42, 43, 46),
+            border_focus: Color32::from_rgb(66, 133, 244),
+            text_primary: Color32::WHITE,
+            text_secondary: Color32::from_rgb(220, 225, 235),
+            text_muted: Color32::from_gray(150),
+            accent: Color32::from_rgb(120, 190, 255),
+        }
+    }
+
+    pub fn light() -> Self {
+        Self {
+            is_dark: false,
+            bg_app: Color32::from_rgb(248, 249, 250),
+            bg_top_bar: Color32::from_rgb(241, 243, 246),
+            bg_sidebar: Color32::from_rgb(243, 245, 248),
+            bg_settings: Color32::from_rgb(255, 255, 255),
+            bg_card: Color32::from_rgb(255, 255, 255),
+            bg_user_bubble: Color32::from_rgb(225, 236, 254),
+            bg_gemini_bubble: Color32::from_rgb(255, 255, 255),
+            bg_input: Color32::from_rgb(255, 255, 255),
+            bg_button: Color32::from_rgb(236, 239, 244),
+            bg_button_hover: Color32::from_rgb(225, 228, 234),
+            bg_active_tab: Color32::from_rgb(255, 255, 255),
+            bg_inactive_tab: Color32::from_rgb(238, 240, 244),
+            border_subtle: Color32::from_rgb(218, 222, 229),
+            border_focus: Color32::from_rgb(26, 115, 232),
+            text_primary: Color32::from_rgb(24, 26, 32),
+            text_secondary: Color32::from_rgb(60, 64, 72),
+            text_muted: Color32::from_rgb(115, 120, 130),
+            accent: Color32::from_rgb(26, 115, 232),
+        }
+    }
+}
+
 pub struct GeminiApp {
     // Auth & Plan
     auth_state: AuthState,
@@ -233,6 +307,7 @@ pub struct GeminiApp {
     selected_model_idx: usize,
     system_prompt: String,
     show_settings: bool,
+    is_dark_mode: bool,
 
     // Stored Conversations & History Sidebar
     show_history_sidebar: bool,
@@ -315,6 +390,8 @@ impl GeminiApp {
             (vec![ConversationTab::new(1)], 1, 2)
         };
 
+        let is_dark_mode = load_theme_preference();
+
         Self {
             auth_state,
             is_pro_plan,
@@ -326,6 +403,7 @@ impl GeminiApp {
             selected_model_idx: 0,
             system_prompt: String::new(),
             show_settings: false,
+            is_dark_mode,
             show_history_sidebar: true,
             history_search: String::new(),
             stored_conversations,
@@ -338,6 +416,14 @@ impl GeminiApp {
             api_key_login_error: None,
             runtime,
             auth_rx: None,
+        }
+    }
+
+    pub fn theme(&self) -> ThemeColors {
+        if self.is_dark_mode {
+            ThemeColors::dark()
+        } else {
+            ThemeColors::light()
         }
     }
 
@@ -1090,6 +1176,15 @@ fn try_get_clipboard_files() -> Vec<std::path::PathBuf> {
 
 impl eframe::App for GeminiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.is_dark_mode {
+            ctx.set_visuals(egui::Visuals::dark());
+        } else {
+            let mut visuals = egui::Visuals::light();
+            visuals.panel_fill = Color32::from_rgb(248, 249, 250);
+            visuals.window_fill = Color32::from_rgb(255, 255, 255);
+            ctx.set_visuals(visuals);
+        }
+
         self.poll_auth(ctx);
         self.poll_chat();
         self.refresh_token_if_needed(ctx.clone());
@@ -1193,8 +1288,9 @@ impl eframe::App for GeminiApp {
 
 impl GeminiApp {
     fn draw_login_screen(&mut self, ctx: &egui::Context) {
+        let theme = self.theme();
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_rgb(19, 19, 20)))
+            .frame(egui::Frame::none().fill(theme.bg_app))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() / 4.0);
@@ -1208,14 +1304,14 @@ impl GeminiApp {
                     ui.label(
                         RichText::new("Rusty Gemini")
                             .size(32.0)
-                            .color(Color32::WHITE)
+                            .color(theme.text_primary)
                             .strong(),
                     );
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new("Fast, lightweight native desktop experience.")
                             .size(15.0)
-                            .color(Color32::from_gray(160)),
+                            .color(theme.text_muted),
                     );
                     ui.add_space(36.0);
 
@@ -1249,7 +1345,7 @@ impl GeminiApp {
                                         ui.separator();
                                     });
                                     cols[1].vertical_centered(|ui| {
-                                        ui.label(RichText::new("OR").color(Color32::from_gray(120)).size(12.0).strong());
+                                        ui.label(RichText::new("OR").color(theme.text_muted).size(12.0).strong());
                                     });
                                     cols[2].vertical_centered(|ui| {
                                         ui.add_space(8.0);
@@ -1262,9 +1358,9 @@ impl GeminiApp {
 
                             // ── Option 2: API Key Login ──────────────────
                             egui::Frame::none()
-                                .fill(Color32::from_rgb(27, 28, 32))
+                                .fill(theme.bg_card)
                                 .rounding(Rounding::same(16.0))
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 48, 56)))
+                                .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                 .inner_margin(egui::Margin::symmetric(20.0, 18.0))
                                 .show(ui, |ui| {
                                     ui.set_width(320.0);
@@ -1273,7 +1369,7 @@ impl GeminiApp {
                                             ui.label(
                                                 RichText::new("🔑 Login with API Key")
                                                     .size(14.0)
-                                                    .color(Color32::WHITE)
+                                                    .color(theme.text_primary)
                                                     .strong(),
                                             );
                                         });
@@ -1281,7 +1377,7 @@ impl GeminiApp {
                                         ui.label(
                                             RichText::new("Enter your Google AI Studio API key:")
                                                 .size(11.5)
-                                                .color(Color32::from_gray(160)),
+                                                .color(theme.text_muted),
                                         );
                                         ui.add_space(8.0);
 
@@ -1365,15 +1461,16 @@ impl GeminiApp {
     }
 
     fn draw_chat_ui(&mut self, ctx: &egui::Context) {
+        let theme = self.theme();
         let sparkle_tex = self.get_sparkle_texture(ctx);
 
         // ── Top Navigation Bar ────────────────────────────────────────────────
         egui::TopBottomPanel::top("top_bar")
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(27, 28, 29))
+                    .fill(theme.bg_top_bar)
                     .inner_margin(egui::Margin::symmetric(16.0, 10.0))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 43, 46))),
+                    .stroke(Stroke::new(1.0_f32, theme.border_subtle)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -1397,15 +1494,15 @@ impl GeminiApp {
                     // History Toggle Button (styled to match username & plan badge)
                     let (hist_bg, hist_stroke, hist_color) = if self.show_history_sidebar {
                         (
-                            Color32::from_rgb(25, 38, 55),
-                            Stroke::new(1.0_f32, Color32::from_rgb(66, 133, 244)),
-                            Color32::from_rgb(130, 190, 255),
+                            if theme.is_dark { Color32::from_rgb(25, 38, 55) } else { Color32::from_rgb(215, 230, 255) },
+                            Stroke::new(1.0_f32, if theme.is_dark { Color32::from_rgb(66, 133, 244) } else { Color32::from_rgb(26, 115, 232) }),
+                            if theme.is_dark { Color32::from_rgb(130, 190, 255) } else { Color32::from_rgb(26, 115, 232) },
                         )
                     } else {
                         (
-                            Color32::from_rgb(34, 35, 38),
-                            Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60)),
-                            Color32::WHITE,
+                            theme.bg_button,
+                            Stroke::new(1.0_f32, theme.border_subtle),
+                            theme.text_primary,
                         )
                     };
                     let hist_text = if self.show_history_sidebar { "💬 Hide History" } else { "💬 History" };
@@ -1425,10 +1522,10 @@ impl GeminiApp {
                     // New Chat Button (styled to match username & plan badge)
                     let new_chat_btn = ui.add_sized(
                         Vec2::new(0.0, 28.0),
-                        egui::Button::new(RichText::new("✨ + New chat").size(12.0).color(Color32::WHITE).strong())
-                            .fill(Color32::from_rgb(34, 35, 38))
+                        egui::Button::new(RichText::new("✨ + New chat").size(12.0).color(theme.text_primary).strong())
+                            .fill(theme.bg_button)
                             .rounding(Rounding::same(14.0))
-                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60))),
+                            .stroke(Stroke::new(1.0_f32, theme.border_subtle)),
                     ).on_hover_text("Open new conversation tab (Ctrl+T)");
                     if new_chat_btn.clicked() {
                         self.add_new_tab();
@@ -1448,10 +1545,10 @@ impl GeminiApp {
                             // Settings button (icon only, matching username/badge elements)
                             let settings_btn = ui.add_sized(
                                 Vec2::new(32.0, 28.0),
-                                egui::Button::new(RichText::new("⚙").size(15.0).color(Color32::from_gray(210)))
-                                    .fill(Color32::from_rgb(34, 35, 38))
+                                egui::Button::new(RichText::new("⚙").size(15.0).color(theme.text_primary))
+                                    .fill(theme.bg_button)
                                     .rounding(Rounding::same(14.0))
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60))),
+                                    .stroke(Stroke::new(1.0_f32, theme.border_subtle)),
                             ).on_hover_text("Preferences & Settings");
                             if settings_btn.clicked() {
                                 self.show_settings = !self.show_settings;
@@ -1464,9 +1561,9 @@ impl GeminiApp {
                             let popup_id = ui.make_persistent_id("user_profile_popup");
 
                             let profile_frame = egui::Frame::none()
-                                .fill(Color32::from_rgb(34, 35, 38))
+                                .fill(theme.bg_button)
                                 .rounding(Rounding::same(18.0))
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60)))
+                                .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                 .inner_margin(egui::Margin::symmetric(10.0, 4.0));
 
                             let profile_resp = profile_frame.show(ui, |ui| {
@@ -1482,9 +1579,9 @@ impl GeminiApp {
                                         ui.label(RichText::new("👤").size(14.0));
                                         ui.add_space(2.0);
                                     }
-                                    ui.label(RichText::new(&name).size(12.5).color(Color32::WHITE).strong());
+                                    ui.label(RichText::new(&name).size(12.5).color(theme.text_primary).strong());
                                     ui.add_space(2.0);
-                                    ui.label(RichText::new("▾").size(10.0).color(Color32::from_gray(160)));
+                                    ui.label(RichText::new("▾").size(10.0).color(theme.text_muted));
                                 });
                             });
 
@@ -1501,8 +1598,9 @@ impl GeminiApp {
                                 |ui| {
                                     ui.set_min_width(260.0);
                                     egui::Frame::none()
-                                        .fill(Color32::from_rgb(28, 29, 33))
+                                        .fill(theme.bg_card)
                                         .inner_margin(egui::Margin::symmetric(14.0, 14.0))
+                                        .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                         .show(ui, |ui| {
                                             ui.horizontal(|ui| {
                                                 if let Some(ref tex) = avatar_tex {
@@ -1517,9 +1615,9 @@ impl GeminiApp {
                                                     ui.add_space(6.0);
                                                 }
                                                 ui.vertical(|ui| {
-                                                    ui.label(RichText::new(&name).size(14.0).color(Color32::WHITE).strong());
+                                                    ui.label(RichText::new(&name).size(14.0).color(theme.text_primary).strong());
                                                     if let Some(ref e) = email {
-                                                        ui.label(RichText::new(e).size(11.0).color(Color32::from_gray(160)));
+                                                        ui.label(RichText::new(e).size(11.0).color(theme.text_muted));
                                                     }
                                                 });
                                             });
@@ -1530,11 +1628,11 @@ impl GeminiApp {
 
                                             // Plan status line
                                             ui.horizontal(|ui| {
-                                                ui.label(RichText::new("✦ Plan:").size(12.0).color(Color32::from_gray(180)));
+                                                ui.label(RichText::new("✦ Plan:").size(12.0).color(theme.text_muted));
                                                 let (p_col, p_bg) = if self.is_pro_plan {
-                                                    (Color32::from_rgb(255, 215, 80), Color32::from_rgb(45, 38, 20))
+                                                    (Color32::from_rgb(255, 215, 80), if theme.is_dark { Color32::from_rgb(45, 38, 20) } else { Color32::from_rgb(255, 248, 225) })
                                                 } else {
-                                                    (Color32::from_rgb(130, 190, 255), Color32::from_rgb(25, 38, 55))
+                                                    (Color32::from_rgb(130, 190, 255), if theme.is_dark { Color32::from_rgb(25, 38, 55) } else { Color32::from_rgb(232, 240, 254) })
                                                 };
                                                 egui::Frame::none()
                                                     .fill(p_bg)
@@ -1551,7 +1649,7 @@ impl GeminiApp {
                                             ui.add_space(6.0);
 
                                             if ui.add(
-                                                egui::Button::new(RichText::new("⚙️  Preferences & Settings").size(13.0).color(Color32::WHITE))
+                                                egui::Button::new(RichText::new("⚙️  Preferences & Settings").size(13.0).color(theme.text_primary))
                                                     .fill(Color32::TRANSPARENT),
                                             ).clicked() {
                                                 self.show_settings = !self.show_settings;
@@ -1561,7 +1659,7 @@ impl GeminiApp {
                                             ui.add_space(4.0);
 
                                             if ui.add(
-                                                egui::Button::new(RichText::new("🔄  Refresh Account & Models").size(13.0).color(Color32::WHITE))
+                                                egui::Button::new(RichText::new("🔄  Refresh Account & Models").size(13.0).color(theme.text_primary))
                                                     .fill(Color32::TRANSPARENT),
                                             ).clicked() {
                                                 if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
@@ -1622,14 +1720,14 @@ impl GeminiApp {
         egui::TopBottomPanel::top("browser_tabs")
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(22, 23, 26))
+                    .fill(if theme.is_dark { Color32::from_rgb(22, 23, 26) } else { Color32::from_rgb(238, 240, 244) })
                     .inner_margin(egui::Margin {
                         left: 14.0,
                         right: 14.0,
                         top: 6.0,
                         bottom: 0.0,
                     })
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 39, 44))),
+                    .stroke(Stroke::new(1.0_f32, theme.border_subtle)),
             )
             .show(ctx, |ui| {
                 let mut switch_to_tab = None;
@@ -1646,15 +1744,15 @@ impl GeminiApp {
                                     let is_active = tab.id == self.active_tab_id;
                                     let (bg_color, stroke_color, text_color) = if is_active {
                                         (
-                                            Color32::from_rgb(34, 36, 42),
-                                            Stroke::new(1.5_f32, Color32::from_rgb(66, 133, 244)),
-                                            Color32::WHITE,
+                                            theme.bg_active_tab,
+                                            Stroke::new(1.5_f32, theme.border_focus),
+                                            theme.text_primary,
                                         )
                                     } else {
                                         (
-                                            Color32::from_rgb(25, 26, 29),
-                                            Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 49)),
-                                            Color32::from_gray(170),
+                                            theme.bg_inactive_tab,
+                                            Stroke::new(1.0_f32, theme.border_subtle),
+                                            theme.text_muted,
                                         )
                                     };
 
@@ -1667,7 +1765,7 @@ impl GeminiApp {
 
                                     // Paint tab background & outline
                                     let tab_bg = if tab_resp.hovered() && !is_active {
-                                        Color32::from_rgb(30, 32, 36)
+                                        theme.bg_button_hover
                                     } else {
                                         bg_color
                                     };
@@ -1746,7 +1844,7 @@ impl GeminiApp {
                                     let close_bg = if is_close_hovered {
                                         Color32::from_rgb(215, 60, 60) // High-visibility red on hover like browsers!
                                     } else if is_active {
-                                        Color32::from_rgb(46, 48, 55)
+                                        if theme.is_dark { Color32::from_rgb(46, 48, 55) } else { Color32::from_rgb(222, 226, 232) }
                                     } else {
                                         Color32::TRANSPARENT
                                     };
@@ -1755,10 +1853,8 @@ impl GeminiApp {
 
                                     let close_color = if is_close_hovered {
                                         Color32::WHITE
-                                    } else if is_active {
-                                        Color32::from_gray(210)
                                     } else {
-                                        Color32::from_gray(140)
+                                        theme.text_muted
                                     };
 
                                     ui.painter().text(
@@ -1831,9 +1927,9 @@ impl GeminiApp {
 
                                 let is_add_hovered = add_resp.hovered();
                                 let add_bg = if is_add_hovered {
-                                    Color32::from_rgb(46, 49, 56)
+                                    theme.bg_button_hover
                                 } else {
-                                    Color32::from_rgb(30, 32, 36)
+                                    theme.bg_button
                                 };
 
                                 ui.painter().rect_filled(add_rect, Rounding::same(14.0), add_bg);
@@ -1842,7 +1938,7 @@ impl GeminiApp {
                                     egui::Align2::CENTER_CENTER,
                                     "+",
                                     egui::FontId::proportional(16.0),
-                                    if is_add_hovered { Color32::WHITE } else { Color32::from_gray(210) },
+                                    theme.text_primary,
                                 );
 
                                 if add_resp.clicked() {
@@ -1868,9 +1964,9 @@ impl GeminiApp {
             egui::SidePanel::right("settings_panel")
                 .frame(
                     egui::Frame::none()
-                        .fill(Color32::from_rgb(27, 28, 29))
+                        .fill(theme.bg_settings)
                         .inner_margin(egui::Margin::symmetric(16.0, 16.0))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 43, 46))),
+                        .stroke(Stroke::new(1.0_f32, theme.border_subtle)),
                 )
                 .resizable(true)
                 .default_width(320.0)
@@ -1880,7 +1976,7 @@ impl GeminiApp {
                         .auto_shrink([false; 2])
                         .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.heading(RichText::new("⚙️ Settings").color(Color32::WHITE));
+                        ui.heading(RichText::new("⚙️ Settings").color(theme.text_primary));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("✕").clicked() {
                                 self.show_settings = false;
@@ -1890,9 +1986,57 @@ impl GeminiApp {
                     ui.separator();
 
                     ui.add_space(8.0);
-                    ui.label(RichText::new("✦ Subscription Plan").strong().color(Color32::WHITE));
+                    ui.label(RichText::new("🎨 Theme / Appearance").strong().color(theme.text_primary));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let dark_selected = self.is_dark_mode;
+                        let light_selected = !self.is_dark_mode;
+                        let btn_w = ((ui.available_width() - 8.0) / 2.0).max(80.0);
+
+                        let dark_btn = ui.add_sized(
+                            Vec2::new(btn_w, 32.0),
+                            egui::Button::new(
+                                RichText::new("🌙 Dark Mode")
+                                    .size(12.5)
+                                    .color(if dark_selected { Color32::WHITE } else { theme.text_muted })
+                                    .strong(),
+                            )
+                            .fill(if dark_selected { Color32::from_rgb(38, 75, 140) } else { theme.bg_button })
+                            .stroke(Stroke::new(1.0_f32, if dark_selected { Color32::from_rgb(66, 133, 244) } else { theme.border_subtle }))
+                            .rounding(Rounding::same(8.0)),
+                        );
+                        if dark_btn.clicked() && !self.is_dark_mode {
+                            self.is_dark_mode = true;
+                            save_theme_preference(true);
+                            ctx.request_repaint();
+                        }
+
+                        let light_btn = ui.add_sized(
+                            Vec2::new(btn_w, 32.0),
+                            egui::Button::new(
+                                RichText::new("☀️ Light Mode")
+                                    .size(12.5)
+                                    .color(if light_selected { if self.is_dark_mode { Color32::WHITE } else { Color32::from_rgb(25, 30, 45) } } else { theme.text_muted })
+                                    .strong(),
+                            )
+                            .fill(if light_selected { Color32::from_rgb(215, 230, 255) } else { theme.bg_button })
+                            .stroke(Stroke::new(1.0_f32, if light_selected { Color32::from_rgb(66, 133, 244) } else { theme.border_subtle }))
+                            .rounding(Rounding::same(8.0)),
+                        );
+                        if light_btn.clicked() && self.is_dark_mode {
+                            self.is_dark_mode = false;
+                            save_theme_preference(false);
+                            ctx.request_repaint();
+                        }
+                    });
+
+                    ui.add_space(12.0);
+                    ui.separator();
+
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("✦ Subscription Plan").strong().color(theme.text_primary));
                     let mut is_pro = self.is_pro_plan;
-                    let label_color = if is_pro { Color32::from_rgb(255, 215, 80) } else { Color32::from_gray(180) };
+                    let label_color = if is_pro { Color32::from_rgb(255, 215, 80) } else { theme.text_muted };
                     if ui
                         .checkbox(
                             &mut is_pro,
@@ -1916,7 +2060,7 @@ impl GeminiApp {
                     );
                     ui.label(
                         RichText::new("Unlocks Gemini 4 Argon & Carbon frontier reasoning models.")
-                            .color(Color32::from_gray(140))
+                            .color(theme.text_muted)
                             .size(11.0),
                     );
 
@@ -1924,7 +2068,7 @@ impl GeminiApp {
                     ui.separator();
                     ui.add_space(8.0);
 
-                    ui.label(RichText::new("🔑 Gemini API Key").strong().color(Color32::WHITE));
+                    ui.label(RichText::new("🔑 Gemini API Key").strong().color(theme.text_primary));
                     let active_key = get_gemini_api_key().unwrap_or_default();
                     let is_api_key_auth = if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
                         tokens.access_token == "api_key_auth"
@@ -1937,7 +2081,7 @@ impl GeminiApp {
                     } else if !active_key.is_empty() {
                         ui.colored_label(Color32::from_rgb(120, 190, 255), RichText::new("● Backup API key configured").size(11.5));
                     } else {
-                        ui.label(RichText::new("No custom API key saved").color(Color32::from_gray(140)).size(11.0));
+                        ui.label(RichText::new("No custom API key saved").color(theme.text_muted).size(11.0));
                     }
                     ui.add_space(4.0);
 
@@ -1954,7 +2098,8 @@ impl GeminiApp {
                         let eye_icon = if self.show_api_key_text { "👁" } else { "👁‍🗨" };
                         if ui.add(
                             egui::Button::new(RichText::new(eye_icon).size(12.0))
-                                .fill(Color32::from_rgb(38, 40, 48))
+                                .fill(theme.bg_button)
+                                .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                 .rounding(Rounding::same(6.0)),
                         ).on_hover_text("Toggle visibility").clicked() {
                             self.show_api_key_text = !self.show_api_key_text;
@@ -1981,7 +2126,7 @@ impl GeminiApp {
                     ui.add_space(16.0);
                     ui.separator();
 
-                    ui.label(RichText::new("🧠 System Instructions").strong().color(Color32::WHITE));
+                    ui.label(RichText::new("🧠 System Instructions").strong().color(theme.text_primary));
                     let avail_sys_w = ui.available_width();
                     ui.add(
                         egui::TextEdit::multiline(&mut self.system_prompt)
@@ -1996,8 +2141,9 @@ impl GeminiApp {
                     if ui
                         .add_sized(
                             Vec2::new(ui.available_width(), 34.0),
-                            egui::Button::new(RichText::new("🗑️ Clear current conversation").color(Color32::WHITE))
-                                .fill(Color32::from_rgb(45, 47, 52))
+                            egui::Button::new(RichText::new("🗑️ Clear current conversation").color(theme.text_primary))
+                                .fill(theme.bg_button)
+                                .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                 .rounding(Rounding::same(8.0)),
                         )
                         .clicked()
@@ -2018,7 +2164,7 @@ impl GeminiApp {
                     if let AuthState::LoggedIn { models, .. } = &self.auth_state {
                         ui.label(
                             RichText::new(format!("🤖 {} active live models loaded", models.len()))
-                                .color(Color32::from_gray(140))
+                                .color(theme.text_muted)
                                 .size(11.0),
                         );
                     }
@@ -2027,21 +2173,21 @@ impl GeminiApp {
                     ui.separator();
                     ui.add_space(8.0);
 
-                    ui.label(RichText::new("ℹ️ About Rusty Gemini").strong().color(Color32::WHITE));
+                    ui.label(RichText::new("ℹ️ About Rusty Gemini").strong().color(theme.text_primary));
                     ui.add_space(6.0);
 
                     egui::Frame::none()
-                        .fill(Color32::from_rgb(33, 35, 39))
+                        .fill(if theme.is_dark { Color32::from_rgb(33, 35, 39) } else { Color32::from_rgb(245, 247, 250) })
                         .rounding(Rounding::same(10.0))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 54, 60)))
+                        .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                         .inner_margin(egui::Margin::symmetric(12.0, 10.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("✦").size(20.0).color(Color32::from_rgb(120, 190, 255)));
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new("Rusty Gemini").size(14.0).color(Color32::WHITE).strong());
-                                    ui.label(RichText::new(format!("Version: v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(Color32::from_gray(170)));
-                                    ui.label(RichText::new(format!("Build Date: {}", env!("BUILD_DATE"))).size(11.0).color(Color32::from_gray(170)));
+                                    ui.label(RichText::new("Rusty Gemini").size(14.0).color(theme.text_primary).strong());
+                                    ui.label(RichText::new(format!("Version: v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(theme.text_muted));
+                                    ui.label(RichText::new(format!("Build Date: {}", env!("BUILD_DATE"))).size(11.0).color(theme.text_muted));
                                 });
                             });
                             ui.add_space(8.0);
@@ -2053,7 +2199,7 @@ impl GeminiApp {
                             ).on_hover_text("https://github.com/0xKahli/gemini-rust");
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("GitHub:").size(10.5).color(Color32::from_gray(140)));
+                                ui.label(RichText::new("GitHub:").size(10.5).color(theme.text_muted));
                                 ui.hyperlink_to(
                                     RichText::new("github.com/0xKahli/gemini-rust").size(10.5).color(Color32::from_rgb(100, 180, 255)),
                                     "https://github.com/0xKahli/gemini-rust",
@@ -2061,7 +2207,7 @@ impl GeminiApp {
                             });
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Website:").size(10.5).color(Color32::from_gray(140)));
+                                ui.label(RichText::new("Website:").size(10.5).color(theme.text_muted));
                                 ui.hyperlink_to(
                                     RichText::new("rusty-gemini.vercel.app").size(10.5).color(Color32::from_rgb(100, 180, 255)),
                                     "https://rusty-gemini.vercel.app",
@@ -2081,9 +2227,9 @@ impl GeminiApp {
             egui::SidePanel::left("history_sidebar")
                 .frame(
                     egui::Frame::none()
-                        .fill(Color32::from_rgb(22, 23, 26))
+                        .fill(theme.bg_sidebar)
                         .inner_margin(egui::Margin::symmetric(12.0, 14.0))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 39, 44))),
+                        .stroke(Stroke::new(1.0_f32, theme.border_subtle)),
                 )
                 .resizable(true)
                 .default_width(260.0)
@@ -2093,12 +2239,12 @@ impl GeminiApp {
                         ui.label(
                             RichText::new("💬 Previous Chats")
                                 .size(14.0)
-                                .color(Color32::WHITE)
+                                .color(theme.text_primary)
                                 .strong(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let close_btn = ui.add(
-                                egui::Button::new(RichText::new("⮜").size(14.0).color(Color32::from_gray(160)))
+                                egui::Button::new(RichText::new("⮜").size(14.0).color(theme.text_muted))
                                     .fill(Color32::TRANSPARENT),
                             ).on_hover_text("Collapse sidebar (Ctrl+H)");
                             if close_btn.clicked() {
@@ -2115,11 +2261,11 @@ impl GeminiApp {
                         egui::Button::new(
                             RichText::new("✨ + New chat")
                                 .size(13.0)
-                                .color(Color32::WHITE)
+                                .color(if theme.is_dark { Color32::WHITE } else { Color32::from_rgb(26, 115, 232) })
                                 .strong(),
                         )
-                        .fill(Color32::from_rgb(38, 48, 65))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 133, 244)))
+                        .fill(if theme.is_dark { Color32::from_rgb(38, 48, 65) } else { Color32::from_rgb(232, 240, 254) })
+                        .stroke(Stroke::new(1.0_f32, if theme.is_dark { Color32::from_rgb(66, 133, 244) } else { Color32::from_rgb(26, 115, 232) }))
                         .rounding(Rounding::same(8.0)),
                     );
                     if new_chat.clicked() {
@@ -2156,12 +2302,12 @@ impl GeminiApp {
                     if matching_convs.is_empty() {
                         ui.vertical_centered(|ui| {
                             ui.add_space(28.0);
-                            ui.label(RichText::new("No saved chats").size(12.5).color(Color32::from_gray(140)));
+                            ui.label(RichText::new("No saved chats").size(12.5).color(theme.text_muted));
                             ui.add_space(4.0);
                             if !search_q.is_empty() {
-                                ui.label(RichText::new("No matches found").size(11.0).color(Color32::from_gray(110)));
+                                ui.label(RichText::new("No matches found").size(11.0).color(theme.text_muted));
                             } else {
-                                ui.label(RichText::new("Conversations will appear here").size(11.0).color(Color32::from_gray(110)));
+                                ui.label(RichText::new("Conversations will appear here").size(11.0).color(theme.text_muted));
                             }
                         });
                     } else {
@@ -2174,15 +2320,15 @@ impl GeminiApp {
                                     let is_active = active_conv_id.as_deref() == Some(&conv.id);
 
                                     let card_bg = if is_active {
-                                        Color32::from_rgb(33, 42, 58)
+                                        if theme.is_dark { Color32::from_rgb(33, 42, 58) } else { Color32::from_rgb(225, 236, 254) }
                                     } else {
-                                        Color32::from_rgb(26, 27, 31)
+                                        theme.bg_card
                                     };
 
                                     let border_color = if is_active {
-                                        Color32::from_rgb(66, 133, 244)
+                                        theme.border_focus
                                     } else {
-                                        Color32::from_rgb(40, 42, 48)
+                                        theme.border_subtle
                                     };
 
                                     let frame = egui::Frame::none()
@@ -2205,7 +2351,7 @@ impl GeminiApp {
                                                     ui.label(
                                                         RichText::new(display_title)
                                                             .size(12.5)
-                                                            .color(Color32::WHITE)
+                                                            .color(theme.text_primary)
                                                             .strong(),
                                                     );
                                                 });
@@ -2214,25 +2360,25 @@ impl GeminiApp {
                                                     ui.label(
                                                         RichText::new(conv.formatted_date())
                                                             .size(10.5)
-                                                            .color(Color32::from_rgb(120, 190, 255)),
+                                                            .color(theme.accent),
                                                     );
                                                     ui.label(
                                                         RichText::new(format!("• {} msgs", conv.history.len()))
                                                             .size(10.5)
-                                                            .color(Color32::from_gray(130)),
+                                                            .color(theme.text_muted),
                                                     );
                                                 });
                                                 ui.add_space(2.0);
                                                 ui.label(
                                                     RichText::new(conv.preview_text())
                                                         .size(11.0)
-                                                        .color(Color32::from_gray(160)),
+                                                        .color(theme.text_muted),
                                                 );
                                             });
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 let del_btn = ui.add(
-                                                    egui::Button::new(RichText::new("🗑").size(12.0).color(Color32::from_gray(140)))
+                                                    egui::Button::new(RichText::new("🗑").size(12.0).color(theme.text_muted))
                                                         .fill(Color32::TRANSPARENT),
                                                 ).on_hover_text("Delete conversation");
                                                 if del_btn.clicked() {
@@ -2293,15 +2439,15 @@ impl GeminiApp {
         egui::TopBottomPanel::bottom("input_bar")
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(19, 19, 20))
+                    .fill(theme.bg_app)
                     .inner_margin(egui::Margin::symmetric(24.0, 10.0)),
             )
             .show(ctx, |ui| {
                 // Floating input pill container (compact bottom capsule with file attachments)
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(30, 31, 35))
+                    .fill(theme.bg_input)
                     .rounding(Rounding::same(24.0))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(52, 55, 62)))
+                    .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                     .inner_margin(egui::Margin::symmetric(14.0, 8.0))
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
@@ -2313,9 +2459,9 @@ impl GeminiApp {
                                         ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
                                         for (f_idx, file) in tab.attached_files.iter().enumerate() {
                                             egui::Frame::none()
-                                                .fill(Color32::from_rgb(42, 45, 54))
+                                                .fill(if theme.is_dark { Color32::from_rgb(42, 45, 54) } else { Color32::from_rgb(235, 240, 250) })
                                                 .rounding(Rounding::same(8.0))
-                                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 133, 244)))
+                                                .stroke(Stroke::new(1.0_f32, theme.accent))
                                                 .inner_margin(egui::Margin::symmetric(8.0, 4.0))
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
@@ -2326,10 +2472,10 @@ impl GeminiApp {
                                                         } else {
                                                             file.file_name.clone()
                                                         };
-                                                        ui.label(RichText::new(name_display).size(12.0).color(Color32::WHITE).strong());
-                                                        ui.label(RichText::new(file.formatted_size()).size(10.5).color(Color32::from_gray(160)));
+                                                        ui.label(RichText::new(name_display).size(12.0).color(theme.text_primary).strong());
+                                                        ui.label(RichText::new(file.formatted_size()).size(10.5).color(theme.text_muted));
                                                         if ui.add(
-                                                            egui::Button::new(RichText::new("✕").size(10.5).color(Color32::from_gray(180)))
+                                                            egui::Button::new(RichText::new("✕").size(10.5).color(theme.text_muted))
                                                                 .fill(Color32::TRANSPARENT),
                                                         ).clicked() {
                                                             remove_file_idx = Some(f_idx);
@@ -2351,7 +2497,7 @@ impl GeminiApp {
                                 // 📎 Attach Button (Opens native Windows file dialog)
                                 let clip_btn = ui.add_sized(
                                     Vec2::new(30.0, 32.0),
-                                    egui::Button::new(RichText::new("📎").size(16.0).color(Color32::from_gray(180)))
+                                    egui::Button::new(RichText::new("📎").size(16.0).color(theme.text_muted))
                                         .fill(Color32::TRANSPARENT)
                                         .rounding(Rounding::same(15.0)),
                                 ).on_hover_text("Upload files, images, or documents (Ctrl+O or Drag & Drop)");
@@ -2415,15 +2561,15 @@ impl GeminiApp {
                                             .unwrap_or("Select model");
 
                                         ui.scope(|ui| {
-                                            ui.style_mut().visuals.widgets.inactive.bg_fill = Color32::from_rgb(38, 40, 46);
+                                            ui.style_mut().visuals.widgets.inactive.bg_fill = theme.bg_button;
                                             ui.style_mut().visuals.widgets.inactive.rounding = Rounding::same(12.0);
-                                            ui.style_mut().visuals.widgets.hovered.bg_fill = Color32::from_rgb(48, 52, 60);
+                                            ui.style_mut().visuals.widgets.hovered.bg_fill = theme.bg_button_hover;
                                             ui.style_mut().visuals.widgets.hovered.rounding = Rounding::same(12.0);
-                                            ui.style_mut().visuals.widgets.active.bg_fill = Color32::from_rgb(48, 52, 60);
+                                            ui.style_mut().visuals.widgets.active.bg_fill = theme.bg_button_hover;
                                             ui.style_mut().visuals.widgets.active.rounding = Rounding::same(12.0);
 
                                             egui::ComboBox::from_id_salt("chatbox_model_select")
-                                                .selected_text(RichText::new(selected_name).size(12.0).color(Color32::WHITE))
+                                                .selected_text(RichText::new(selected_name).size(12.0).color(theme.text_primary))
                                                 .width(model_w)
                                                 .show_ui(ui, |ui| {
                                                     for (i, model) in models.iter().enumerate() {
@@ -2443,11 +2589,11 @@ impl GeminiApp {
 
                                 // Send button (far right)
                                 let (btn_fill, btn_color) = if is_streaming {
-                                    (Color32::from_rgb(45, 47, 52), Color32::from_gray(180))
+                                    (theme.bg_button, theme.text_muted)
                                 } else if can_send {
                                     (Color32::from_rgb(26, 115, 232), Color32::WHITE)
                                 } else {
-                                    (Color32::from_rgb(38, 40, 45), Color32::from_gray(130))
+                                    (theme.bg_button, theme.text_muted)
                                 };
 
                                 let btn_icon = if is_streaming { "⏳" } else { "➤" };
@@ -2471,7 +2617,7 @@ impl GeminiApp {
                     ui.label(
                         RichText::new("Gemini may display inaccurate info, including about people, so double-check its responses.")
                             .size(11.0)
-                            .color(Color32::from_gray(120)),
+                            .color(theme.text_muted),
                     );
                 });
             });
@@ -2482,7 +2628,7 @@ impl GeminiApp {
 
         // ── Main Chat Area ────────────────────────────────────────────────────
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_rgb(19, 19, 20)))
+            .frame(egui::Frame::none().fill(theme.bg_app))
             .show(ctx, |ui| {
                 let (is_empty, is_streaming, scroll_to_bottom) = if let Some(tab) = self.active_tab() {
                     (tab.history.is_empty(), tab.is_streaming, if tab.history.is_empty() { false } else { tab.scroll_to_bottom })
@@ -2562,12 +2708,13 @@ impl GeminiApp {
                                 // User Message Bubble (Right-aligned, hugs content width)
                                 let max_text_w = (ui.available_width() * 0.70 - 32.0).max(80.0);
                                 let font_id = egui::FontId::proportional(14.0);
+                                let user_bubble_text_color = if theme.is_dark { Color32::WHITE } else { Color32::from_rgb(20, 25, 35) };
 
                                 let text_w = if !msg.content.trim().is_empty() {
                                     let galley = ui.painter().layout(
                                         msg.content.clone(),
                                         font_id.clone(),
-                                        Color32::WHITE,
+                                        user_bubble_text_color,
                                         max_text_w,
                                     );
                                     galley.size().x
@@ -2580,7 +2727,7 @@ impl GeminiApp {
                                     let mut max_chip = 0.0_f32;
                                     for file in &msg.files {
                                         let label = format!("{} {}", file.file_name, file.formatted_size());
-                                        let g = ui.painter().layout_no_wrap(label, chip_font.clone(), Color32::WHITE);
+                                        let g = ui.painter().layout_no_wrap(label, chip_font.clone(), user_bubble_text_color);
                                         let w = g.size().x + 36.0;
                                         max_chip = max_chip.max(w);
                                     }
@@ -2593,8 +2740,9 @@ impl GeminiApp {
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                                     egui::Frame::none()
-                                        .fill(Color32::from_rgb(43, 52, 69))
+                                        .fill(theme.bg_user_bubble)
                                         .rounding(Rounding::same(16.0))
+                                        .stroke(Stroke::new(1.0_f32, if theme.is_dark { Color32::from_rgb(55, 68, 92) } else { Color32::from_rgb(195, 215, 250) }))
                                         .inner_margin(egui::Margin::symmetric(18.0, 12.0))
                                         .show(ui, |ui| {
                                             ui.set_width(inner_w);
@@ -2603,15 +2751,15 @@ impl GeminiApp {
                                                 if !msg.files.is_empty() {
                                                     for file in &msg.files {
                                                         egui::Frame::none()
-                                                            .fill(Color32::from_rgb(31, 39, 56))
+                                                            .fill(if theme.is_dark { Color32::from_rgb(31, 39, 56) } else { Color32::from_rgb(215, 230, 252) })
                                                             .rounding(Rounding::same(8.0))
-                                                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 110, 180)))
+                                                            .stroke(Stroke::new(1.0_f32, theme.accent))
                                                             .inner_margin(egui::Margin::symmetric(8.0, 4.0))
                                                             .show(ui, |ui| {
                                                                 ui.horizontal(|ui| {
                                                                     ui.label(RichText::new(file.icon()).size(13.0));
-                                                                    ui.label(RichText::new(&file.file_name).size(12.0).color(Color32::WHITE).strong());
-                                                                    ui.label(RichText::new(file.formatted_size()).size(10.0).color(Color32::from_gray(180)));
+                                                                    ui.label(RichText::new(&file.file_name).size(12.0).color(user_bubble_text_color).strong());
+                                                                    ui.label(RichText::new(file.formatted_size()).size(10.0).color(theme.text_muted));
                                                                 });
                                                             });
                                                         ui.add_space(4.0);
@@ -2622,7 +2770,7 @@ impl GeminiApp {
                                                 }
 
                                                 if !msg.content.trim().is_empty() {
-                                                    ui.label(RichText::new(&msg.content).size(14.0).color(Color32::WHITE));
+                                                    ui.label(RichText::new(&msg.content).size(14.0).color(user_bubble_text_color));
                                                 }
                                             });
                                         });
@@ -2631,9 +2779,9 @@ impl GeminiApp {
                                 // Gemini Response Card (Left-aligned)
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                     egui::Frame::none()
-                                        .fill(Color32::from_rgb(27, 28, 30))
+                                        .fill(theme.bg_gemini_bubble)
                                         .rounding(Rounding::same(14.0))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 48)))
+                                        .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                         .inner_margin(egui::Margin::symmetric(22.0, 16.0))
                                         .show(ui, |ui| {
                                             ui.set_max_width(ui.available_width() * 0.88);
@@ -2663,14 +2811,15 @@ impl GeminiApp {
                                                     let copy_color = if is_copied {
                                                         Color32::from_rgb(100, 220, 140)
                                                     } else {
-                                                        Color32::from_gray(160)
+                                                        theme.text_muted
                                                     };
                                                     if ui
                                                         .add(
                                                             egui::Button::new(
                                                                 RichText::new(copy_label).size(11.0).color(copy_color),
                                                             )
-                                                            .fill(Color32::from_rgb(38, 40, 44))
+                                                            .fill(theme.bg_button)
+                                                            .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                                             .rounding(Rounding::same(8.0)),
                                                         )
                                                         .clicked()
@@ -2682,9 +2831,10 @@ impl GeminiApp {
                                                     if ui
                                                         .add(
                                                             egui::Button::new(
-                                                                RichText::new("📄 PDF").size(11.0).color(Color32::from_gray(160)),
+                                                                RichText::new("📄 PDF").size(11.0).color(theme.text_muted),
                                                             )
-                                                            .fill(Color32::from_rgb(38, 40, 44))
+                                                            .fill(theme.bg_button)
+                                                            .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                                             .rounding(Rounding::same(8.0)),
                                                         )
                                                         .on_hover_text("Save this answer as a PDF document")
@@ -2705,9 +2855,9 @@ impl GeminiApp {
                         if is_streaming {
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                 egui::Frame::none()
-                                    .fill(Color32::from_rgb(27, 28, 30))
+                                    .fill(theme.bg_gemini_bubble)
                                     .rounding(Rounding::same(14.0))
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 44, 48)))
+                                    .stroke(Stroke::new(1.0_f32, theme.border_subtle))
                                     .inner_margin(egui::Margin::symmetric(22.0, 16.0))
                                     .show(ui, |ui| {
                                         ui.set_max_width(ui.available_width() * 0.88);

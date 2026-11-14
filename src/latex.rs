@@ -24,13 +24,13 @@ impl LatexCache {
     }
 
     /// Renders a display LaTeX math expression to an egui TextureHandle (cached).
-    pub fn get_or_render(&mut self, ctx: &Context, expr: &str, is_display: bool) -> Option<TextureHandle> {
+    pub fn get_or_render(&mut self, ctx: &Context, expr: &str, is_display: bool, is_dark: bool) -> Option<TextureHandle> {
         let clean_expr = expr.trim();
         if clean_expr.is_empty() {
             return None;
         }
 
-        let key = format!("{}:{}", if is_display { "disp" } else { "inline" }, clean_expr);
+        let key = format!("{}:{}:{}", if is_display { "disp" } else { "inline" }, if is_dark { "dark" } else { "light" }, clean_expr);
         if let Some(tex) = self.textures.get(&key) {
             return Some(tex.clone());
         }
@@ -39,7 +39,7 @@ impl LatexCache {
         let mut opts = PngOptions::new();
         opts.display = is_display;
         opts.dpi = Dim::from_i64(144);
-        opts.color = Color::rgb(230, 240, 255);
+        opts.color = if is_dark { Color::rgb(230, 240, 255) } else { Color::rgb(20, 25, 35) };
         opts.font_size_pt = if is_display { Dim::from_i64(15) } else { Dim::from_i64(13) };
 
         match latex_to_png(clean_expr, font, &opts) {
@@ -675,6 +675,7 @@ pub fn render_content_with_latex(
     markdown_cache: &mut egui_commonmark::CommonMarkCache,
     content: &str,
 ) {
+    let is_dark = ctx.style().visuals.dark_mode;
     let has_display = content.contains("$$") || content.contains("\\[");
 
     if !has_display {
@@ -702,7 +703,7 @@ pub fn render_content_with_latex(
                 ui.add_space(8.0);
 
                 // Try rendering crisp LaTeX formula with proper text-proportional scaling
-                if let Some(tex) = latex_cache.get_or_render(ctx, clean_expr, true) {
+                if let Some(tex) = latex_cache.get_or_render(ctx, clean_expr, true, is_dark) {
                     let orig_size = tex.size_vec2();
                     // Proportional scaling: target a natural line height (~26-30pt) instead of gigantic raster
                     let target_h = 28.0_f32;
@@ -719,7 +720,11 @@ pub fn render_content_with_latex(
                         ui.label(
                             RichText::new(unicode_eq)
                                 .size(15.5)
-                                .color(Color32::from_rgb(225, 238, 255))
+                                .color(if is_dark {
+                                    Color32::from_rgb(225, 238, 255)
+                                } else {
+                                    Color32::from_rgb(25, 30, 45)
+                                })
                                 .strong(),
                         );
                     });

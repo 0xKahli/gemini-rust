@@ -98,6 +98,22 @@ fn session_path() -> PathBuf {
     get_storage_dir().join("session_tabs.json")
 }
 
+pub fn load_theme_preference() -> bool {
+    let p = get_storage_dir().join("theme.txt");
+    if let Ok(content) = std::fs::read_to_string(&p) {
+        let trimmed = content.trim().to_lowercase();
+        if trimmed == "light" {
+            return false;
+        }
+    }
+    true // default: dark mode
+}
+
+pub fn save_theme_preference(is_dark: bool) {
+    let p = get_storage_dir().join("theme.txt");
+    let _ = std::fs::write(&p, if is_dark { "dark" } else { "light" });
+}
+
 pub fn load_conversations() -> Vec<StoredConversation> {
     let path = conversations_path();
     if let Ok(data) = std::fs::read_to_string(&path) {
