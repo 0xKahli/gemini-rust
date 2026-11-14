@@ -1,14 +1,17 @@
 use crate::auth::{
-    clear_tokens, detect_account_plan, fetch_available_models, get_gemini_api_key, load_is_pro_plan,
-    load_tokens, refresh_access_token, save_gemini_api_key, save_is_pro_plan, save_tokens, start_login_flow, ModelInfo, TokenStore,
+    clear_tokens, detect_account_plan, fetch_available_models, get_gemini_api_key, load_tokens,
+    refresh_access_token, save_gemini_api_key, save_tokens, start_login_flow, ModelInfo,
+    TokenStore,
 };
 use crate::gemini::{stream_message, AuthMethod};
 use crate::storage::{
-    load_conversations, load_session, load_theme_preference, save_session,
+    clear_all_conversations_for_account, get_account_key, load_account_plan_tier,
+    load_conversations_for_account, load_session_for_account, load_theme_preference,
+    save_account_plan_tier, save_conversations_for_account, save_session_for_account,
     save_theme_preference, SavedSessionState, SavedTabState, StoredConversation,
 };
 use base64::Engine;
-use crate::types::{guess_mime_type, AttachedFile, Message, Role};
+use crate::types::{guess_mime_type, AccountPlanTier, AttachedFile, Message, Role};
 use egui::{Color32, RichText, Rounding, Stroke, Vec2};
 use egui_commonmark::CommonMarkCache;
 use std::sync::Arc;
@@ -294,6 +297,8 @@ impl ThemeColors {
 pub struct GeminiApp {
     // Auth & Plan
     auth_state: AuthState,
+    current_account_key: Option<String>,
+    plan_tier: AccountPlanTier,
     is_pro_plan: bool,
     detected_plan_name: String,
     avatar_texture: Option<egui::TextureHandle>,
@@ -334,7 +339,7 @@ enum AuthTaskResult {
     ModelsLoaded(Vec<ModelInfo>),
     ModelsError(String),
     TokenRefreshed(TokenStore),
-    PlanDetected(String),
+    PlanDetected(AccountPlanTier),
 }
 
 impl GeminiApp {
@@ -348,52 +353,91 @@ impl GeminiApp {
                 .expect("Failed to create Tokio runtime"),
         );
 
-        let is_pro_plan = load_is_pro_plan();
-        let detected_plan_name = if is_pro_plan {
-            "✦ Google AI Pro".to_string()
-        } else {
-            "Free Plan".to_string()
-        };
-
         // Load saved session from %APPDATA%/gemini_client/auth.json or keyring
         let saved = load_tokens();
-        let auth_state = match saved {
-            Some(tokens) => AuthState::LoggedIn {
-                tokens,
-                models: default_models(is_pro_plan),
-                loading_models: true,
-            },
-            None => AuthState::LoggedOut,
-        };
+        let (
+            auth_state,
+            current_account_key,
+            plan_tier,
+            is_pro_plan,
+            detected_plan_name,
+            stored_conversations,
+            tabs,
+            active_tab_id,
+            next_tab_id,
+        ) = match saved {
+            Some(tokens) => {
+                let acc_key = get_account_key(tokens.email.as_deref(), &tokens.access_token);
+                let tier = load_account_plan_tier(&acc_key);
+                let is_pro = tier.is_paid();
+                let plan_name = tier.display_name().to_string();
+                let convs = load_conversations_for_account(&acc_key);
 
-        let stored_conversations = load_conversations();
+                let (restored_tabs, active_id, next_id) =
+                    if let Some(session) = load_session_for_account(&acc_key) {
+                        let restored: Vec<ConversationTab> = session
+                            .tabs
+                            .into_iter()
+                            .map(|t| {
+                                ConversationTab::with_conversation(
+                                    t.id, t.conv_id, t.title, t.history,
+                                )
+                            })
+                            .collect();
+                        if !restored.is_empty() {
+                            let act = if restored.iter().any(|t| t.id == session.active_tab_id) {
+                                session.active_tab_id
+                            } else {
+                                restored[0].id
+                            };
+                            let nxt = session
+                                .next_tab_id
+                                .max(restored.iter().map(|t| t.id).max().unwrap_or(1) + 1);
+                            (restored, act, nxt)
+                        } else {
+                            (vec![ConversationTab::new(1)], 1, 2)
+                        }
+                    } else {
+                        (vec![ConversationTab::new(1)], 1, 2)
+                    };
 
-        // Restore tabs from previous session if available
-        let (tabs, active_tab_id, next_tab_id) = if let Some(session) = load_session() {
-            let restored: Vec<ConversationTab> = session
-                .tabs
-                .into_iter()
-                .map(|t| ConversationTab::with_conversation(t.id, t.conv_id, t.title, t.history))
-                .collect();
-            if !restored.is_empty() {
-                let active = if restored.iter().any(|t| t.id == session.active_tab_id) {
-                    session.active_tab_id
-                } else {
-                    restored[0].id
+                let state = AuthState::LoggedIn {
+                    tokens,
+                    models: default_models(is_pro),
+                    loading_models: true,
                 };
-                let next_id = session.next_tab_id.max(restored.iter().map(|t| t.id).max().unwrap_or(1) + 1);
-                (restored, active, next_id)
-            } else {
-                (vec![ConversationTab::new(1)], 1, 2)
+
+                (
+                    state,
+                    Some(acc_key),
+                    tier,
+                    is_pro,
+                    plan_name,
+                    convs,
+                    restored_tabs,
+                    active_id,
+                    next_id,
+                )
             }
-        } else {
-            (vec![ConversationTab::new(1)], 1, 2)
+            None => (
+                AuthState::LoggedOut,
+                None,
+                AccountPlanTier::Free,
+                false,
+                "Free Plan".to_string(),
+                Vec::new(),
+                vec![ConversationTab::new(1)],
+                1,
+                2,
+            ),
         };
 
         let is_dark_mode = load_theme_preference();
 
         Self {
             auth_state,
+            current_account_key,
+            plan_tier,
             is_pro_plan,
             detected_plan_name,
             avatar_texture: None,
@@ -565,6 +609,7 @@ impl GeminiApp {
     // ── Storage & Previous Conversations ──────────────────────────────────────
 
     pub fn persist_session(&self) {
+        let acc_key = self.current_account_key.as_deref().unwrap_or("default");
         let saved_tabs: Vec<SavedTabState> = self
             .tabs
             .iter()
@@ -581,10 +626,14 @@ impl GeminiApp {
             next_tab_id: self.next_tab_id,
             selected_model_idx: self.selected_model_idx,
         };
-        save_session(&session);
+        save_session_for_account(acc_key, &session);
     }
 
     pub fn save_tab_conversation(&mut self, tab_id: u64) {
+        let acc_key = self
+            .current_account_key
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
         if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
             if !tab.history.is_empty() {
                 let model_name = match &self.auth_state {
@@ -607,7 +656,7 @@ impl GeminiApp {
                     self.stored_conversations.insert(0, conv);
                 }
                 self.stored_conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                crate::storage::save_conversations(&self.stored_conversations);
+                save_conversations_for_account(&acc_key, &self.stored_conversations);
             }
         }
         self.persist_session();
@@ -654,16 +703,18 @@ impl GeminiApp {
     }
 
     pub fn delete_stored_conversation(&mut self, conv_id: &str) {
+        let acc_key = self.current_account_key.as_deref().unwrap_or("default");
         self.stored_conversations.retain(|c| c.id != conv_id);
-        crate::storage::save_conversations(&self.stored_conversations);
+        save_conversations_for_account(acc_key, &self.stored_conversations);
         if self.confirm_delete_id.as_deref() == Some(conv_id) {
             self.confirm_delete_id = None;
         }
     }
 
     pub fn clear_all_stored_history(&mut self) {
+        let acc_key = self.current_account_key.as_deref().unwrap_or("default");
         self.stored_conversations.clear();
-        crate::storage::clear_all_conversations();
+        clear_all_conversations_for_account(acc_key);
         self.confirm_delete_id = None;
     }
 
@@ -759,19 +810,30 @@ impl GeminiApp {
         None
     }
 
-    fn set_pro_plan(&mut self, is_pro: bool, ctx: egui::Context) {
-        self.is_pro_plan = is_pro;
-        self.detected_plan_name = if is_pro {
-            "✦ Google AI Pro".to_string()
-        } else {
-            "Free Plan".to_string()
-        };
-        save_is_pro_plan(is_pro);
+    fn set_plan_tier(&mut self, tier: AccountPlanTier, ctx: egui::Context) {
+        self.plan_tier = tier;
+        self.is_pro_plan = tier.is_paid();
+        self.detected_plan_name = tier.display_name().to_string();
+        if let Some(ref acc_key) = self.current_account_key {
+            save_account_plan_tier(acc_key, tier);
+        }
         if let AuthState::LoggedIn { models, .. } = &mut self.auth_state {
-            *models = default_models(is_pro);
-            self.selected_model_idx = 0;
+            *models = default_models(self.is_pro_plan);
+            if self.selected_model_idx >= models.len() {
+                self.selected_model_idx = 0;
+            }
         }
         ctx.request_repaint();
+    }
+
+    #[allow(dead_code)]
+    fn set_pro_plan(&mut self, is_pro: bool, ctx: egui::Context) {
+        let tier = if is_pro {
+            AccountPlanTier::Pro
+        } else {
+            AccountPlanTier::Free
+        };
+        self.set_plan_tier(tier, ctx);
     }
 
     // ── Auth helpers ──────────────────────────────────────────────────────────
@@ -872,8 +934,9 @@ impl GeminiApp {
         // Automatically detect account plan from live quota
         let tx_plan = tx.clone();
         let ctx_plan = ctx.clone();
+        let tokens_for_plan = tokens.clone();
         self.runtime.spawn(async move {
-            let plan = detect_account_plan().await;
+            let plan = detect_account_plan(&tokens_for_plan).await;
             let _ = tx_plan.send(AuthTaskResult::PlanDetected(plan)).await;
             ctx_plan.request_repaint();
         });
@@ -923,6 +986,52 @@ impl GeminiApp {
             Some(AuthTaskResult::LoginSuccess(tokens)) => {
                 let ctx_clone = ctx.clone();
                 self.auth_rx = None;
+
+                let acc_key = get_account_key(tokens.email.as_deref(), &tokens.access_token);
+                self.current_account_key = Some(acc_key.clone());
+
+                // Load conversation history unique to this account
+                self.stored_conversations = load_conversations_for_account(&acc_key);
+
+                // Restore session tabs unique to this account
+                if let Some(session) = load_session_for_account(&acc_key) {
+                    let restored: Vec<ConversationTab> = session
+                        .tabs
+                        .into_iter()
+                        .map(|t| {
+                            ConversationTab::with_conversation(
+                                t.id, t.conv_id, t.title, t.history,
+                            )
+                        })
+                        .collect();
+                    if !restored.is_empty() {
+                        self.active_tab_id = if restored.iter().any(|t| t.id == session.active_tab_id) {
+                            session.active_tab_id
+                        } else {
+                            restored[0].id
+                        };
+                        self.next_tab_id = session
+                            .next_tab_id
+                            .max(restored.iter().map(|t| t.id).max().unwrap_or(1) + 1);
+                        self.tabs = restored;
+                    } else {
+                        self.tabs = vec![ConversationTab::new(1)];
+                        self.active_tab_id = 1;
+                        self.next_tab_id = 2;
+                    }
+                } else {
+                    self.tabs = vec![ConversationTab::new(1)];
+                    self.active_tab_id = 1;
+                    self.next_tab_id = 2;
+                }
+
+                // Load plan for this account (defaults to Free!)
+                self.plan_tier = load_account_plan_tier(&acc_key);
+                self.is_pro_plan = self.plan_tier.is_paid();
+                self.detected_plan_name = self.plan_tier.display_name().to_string();
+
+                self.avatar_texture = None;
+
                 self.auth_state = AuthState::LoggedIn {
                     tokens: tokens.clone(),
                     models: default_models(self.is_pro_plan),
@@ -959,15 +1068,19 @@ impl GeminiApp {
                     *tokens = new_tokens;
                 }
             }
-            Some(AuthTaskResult::PlanDetected(plan)) => {
-                let is_pro = plan.contains("Pro") || self.is_pro_plan;
-                self.is_pro_plan = is_pro;
-                self.detected_plan_name = if is_pro {
-                    "✦ Google AI Pro".to_string()
-                } else {
-                    plan
-                };
-                save_is_pro_plan(is_pro);
+            Some(AuthTaskResult::PlanDetected(detected_tier)) => {
+                self.plan_tier = detected_tier;
+                self.is_pro_plan = detected_tier.is_paid();
+                self.detected_plan_name = detected_tier.display_name().to_string();
+                if let Some(ref acc_key) = self.current_account_key {
+                    save_account_plan_tier(acc_key, detected_tier);
+                }
+                if let AuthState::LoggedIn { models, .. } = &mut self.auth_state {
+                    *models = default_models(self.is_pro_plan);
+                    if self.selected_model_idx >= models.len() {
+                        self.selected_model_idx = 0;
+                    }
+                }
             }
             None => {}
         }
@@ -1334,39 +1447,36 @@ impl GeminiApp {
 
                             ui.add_space(16.0);
 
-                            // ── Centered Divider (Exactly matches 320px width of buttons & card) ──
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(320.0, 24.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.spacing_mut().item_spacing = Vec2::ZERO;
-                                    let line_w = (320.0 - 44.0) / 2.0;
+                            // ── Centered Divider (Exactly 320px width, centered between Google button & API Key card) ──
+                            let (divider_rect, _) = ui.allocate_exact_size(Vec2::new(320.0, 24.0), egui::Sense::hover());
+                            let center_y = divider_rect.center().y;
+                            let line_w = (320.0 - 44.0) / 2.0;
 
-                                    // Left subtle line
-                                    let (l_rect, _) = ui.allocate_exact_size(Vec2::new(line_w, 20.0), egui::Sense::hover());
-                                    ui.painter().line_segment(
-                                        [l_rect.left_center(), l_rect.right_center()],
-                                        Stroke::new(1.0_f32, theme.border_subtle),
-                                    );
+                            // Left subtle line
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(divider_rect.left(), center_y),
+                                    egui::pos2(divider_rect.left() + line_w, center_y),
+                                ],
+                                Stroke::new(1.0_f32, theme.border_subtle),
+                            );
 
-                                    // Center "OR" label
-                                    ui.add_sized(
-                                        Vec2::new(44.0, 20.0),
-                                        egui::Label::new(
-                                            RichText::new("OR")
-                                                .color(theme.text_muted)
-                                                .size(11.5)
-                                                .strong(),
-                                        ),
-                                    );
+                            // Center "OR" label
+                            ui.painter().text(
+                                divider_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "OR",
+                                egui::FontId::proportional(11.5),
+                                theme.text_muted,
+                            );
 
-                                    // Right subtle line
-                                    let (r_rect, _) = ui.allocate_exact_size(Vec2::new(line_w, 20.0), egui::Sense::hover());
-                                    ui.painter().line_segment(
-                                        [r_rect.left_center(), r_rect.right_center()],
-                                        Stroke::new(1.0_f32, theme.border_subtle),
-                                    );
-                                },
+                            // Right subtle line
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(divider_rect.right() - line_w, center_y),
+                                    egui::pos2(divider_rect.right(), center_y),
+                                ],
+                                Stroke::new(1.0_f32, theme.border_subtle),
                             );
 
                             ui.add_space(16.0);
@@ -1692,11 +1802,18 @@ impl GeminiApp {
                                                 egui::Button::new(RichText::new("🚪  Sign Out").size(13.0).color(Color32::from_rgb(255, 120, 120)))
                                                     .fill(Color32::TRANSPARENT),
                                             ).clicked() {
+                                                // Persist active tabs for this account before clearing
+                                                self.persist_session();
                                                 clear_tokens();
+                                                self.current_account_key = None;
                                                 self.auth_state = AuthState::LoggedOut;
                                                 self.tabs = vec![ConversationTab::new(1)];
                                                 self.active_tab_id = 1;
                                                 self.next_tab_id = 2;
+                                                self.stored_conversations.clear();
+                                                self.plan_tier = AccountPlanTier::Free;
+                                                self.is_pro_plan = false;
+                                                self.detected_plan_name = "Free Plan".to_string();
                                                 self.avatar_texture = None;
                                                 ui.memory_mut(|mem| mem.close_popup());
                                             }
@@ -1707,12 +1824,8 @@ impl GeminiApp {
                             ui.add_space(8.0);
 
                             // Plan badge
-                            let (badge_color, badge_bg) = if self.is_pro_plan {
-                                (Color32::from_rgb(255, 215, 80), Color32::from_rgb(45, 36, 16))
-                            } else {
-                                (Color32::from_rgb(130, 190, 255), Color32::from_rgb(25, 38, 55))
-                            };
-                            let badge_text = if self.is_pro_plan { "✦ GOOGLE AI PRO" } else { "FREE" };
+                            let (badge_color, badge_bg) = self.plan_tier.colors();
+                            let badge_text = self.plan_tier.badge_text();
                             egui::Frame::none()
                                 .fill(badge_bg)
                                 .rounding(Rounding::same(12.0))
@@ -2049,32 +2162,33 @@ impl GeminiApp {
                     ui.separator();
 
                     ui.add_space(8.0);
-                    ui.label(RichText::new("✦ Subscription Plan").strong().color(theme.text_primary));
-                    let mut is_pro = self.is_pro_plan;
-                    let label_color = if is_pro { Color32::from_rgb(255, 215, 80) } else { theme.text_muted };
-                    if ui
-                        .checkbox(
-                            &mut is_pro,
-                            RichText::new("Google AI Pro / Advanced")
-                                .color(label_color)
-                                .strong(),
-                        )
-                        .changed()
-                    {
-                        self.set_pro_plan(is_pro, ctx.clone());
-                    }
+                    ui.label(RichText::new("✦ Subscription Plan Tier").strong().color(theme.text_primary));
+
+                    let (plan_color, _) = self.plan_tier.colors();
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            plan_color,
+                            RichText::new(format!("● Active Plan: {}", self.plan_tier.display_name())).size(13.0).strong(),
+                        );
+                    });
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Account Tier:").color(theme.text_muted).size(12.0));
+                        if ui.selectable_label(self.plan_tier == AccountPlanTier::Free, "Free").clicked() {
+                            self.set_plan_tier(AccountPlanTier::Free, ctx.clone());
+                        }
+                        if ui.selectable_label(self.plan_tier == AccountPlanTier::Pro, "✦ Pro").clicked() {
+                            self.set_plan_tier(AccountPlanTier::Pro, ctx.clone());
+                        }
+                        if ui.selectable_label(self.plan_tier == AccountPlanTier::Ultra, "✦ Ultra").clicked() {
+                            self.set_plan_tier(AccountPlanTier::Ultra, ctx.clone());
+                        }
+                    });
+
                     ui.add_space(4.0);
-                    let plan_color = if self.is_pro_plan {
-                        Color32::from_rgb(255, 215, 80)
-                    } else {
-                        Color32::from_rgb(130, 190, 255)
-                    };
-                    ui.colored_label(
-                        plan_color,
-                        RichText::new(format!("● Active Plan: {}", self.detected_plan_name)).size(13.0).strong(),
-                    );
                     ui.label(
-                        RichText::new("Unlocks Gemini 4 Argon & Carbon frontier reasoning models.")
+                        RichText::new("Pro & Ultra tiers unlock Gemini 4 Argon & Carbon frontier reasoning models.")
                             .color(theme.text_muted)
                             .size(11.0),
                     );

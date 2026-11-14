@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use crate::types::AccountPlanTier;
 use oauth2::{
     basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
     ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl, RefreshToken, Scope,
@@ -208,6 +209,8 @@ pub fn clear_tokens() {
     let _ = std::fs::remove_file(&api_key_path);
     let avatar = get_config_dir().join("avatar.png");
     let _ = std::fs::remove_file(&avatar);
+    let plan = get_config_dir().join("plan.txt");
+    let _ = std::fs::remove_file(&plan);
     #[cfg(windows)]
     {
         use winreg::enums::*;
@@ -215,6 +218,7 @@ pub fn clear_tokens() {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         if let Ok(env) = hkcu.open_subkey_with_flags("Environment", KEY_WRITE) {
             let _ = env.delete_value("GEMINI_API_KEY");
+            let _ = env.delete_value("GEMINI_IS_PRO_PLAN");
         }
     }
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
@@ -222,35 +226,24 @@ pub fn clear_tokens() {
     }
 }
 
+#[allow(dead_code)]
 pub fn load_is_pro_plan() -> bool {
-    // 1. Check plan.txt in config directory
+    // 1. Check legacy plan.txt in config directory
     let p = get_config_dir().join("plan.txt");
     if let Ok(content) = std::fs::read_to_string(&p) {
         let trimmed = content.trim().to_lowercase();
-        if trimmed == "1" || trimmed == "true" || trimmed == "pro" {
+        if trimmed == "1" || trimmed == "true" || trimmed == "pro" || trimmed == "ultra" {
             return true;
         } else if trimmed == "0" || trimmed == "false" || trimmed == "free" {
             return false;
         }
     }
 
-    // 2. Check Windows User Registry
-    #[cfg(windows)]
-    {
-        use winreg::enums::*;
-        use winreg::RegKey;
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(env) = hkcu.open_subkey("Environment") {
-            if let Ok(val) = env.get_value::<String, _>("GEMINI_IS_PRO_PLAN") {
-                return val == "1" || val.to_lowercase() == "true";
-            }
-        }
-    }
-
-    // Default to true for Google AI Pro users
-    true
+    // Default to false (Free Plan) — never assume Pro for unknown or basic accounts
+    false
 }
 
+#[allow(dead_code)]
 pub fn save_is_pro_plan(is_pro: bool) {
     let p = get_config_dir().join("plan.txt");
     let _ = std::fs::write(&p, if is_pro { "pro" } else { "free" });
@@ -495,35 +488,61 @@ struct ModelsResponse {
     models: Option<Vec<ModelInfo>>,
 }
 
-pub async fn detect_account_plan() -> String {
-    if load_is_pro_plan() {
-        return "✦ Google AI Pro".to_string();
-    }
+pub async fn detect_account_plan(tokens: &TokenStore) -> AccountPlanTier {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
-    let key = match get_gemini_api_key() {
-        Some(k) => k,
-        None => return "Free Plan".to_string(),
-    };
-
-    let client = Client::new();
     let body = serde_json::json!({
         "contents": [{
             "parts": [{ "text": "ping" }]
-        }]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": 1
+        }
     });
 
-    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent";
+    // 1. Probe Ultra access
+    let ultra_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-ultra:generateContent";
+    let ultra_req = if tokens.access_token == "api_key_auth" {
+        get_gemini_api_key().map(|key| client.post(ultra_url).header("x-goog-api-key", key))
+    } else {
+        Some(client.post(ultra_url).bearer_auth(&tokens.access_token))
+    };
 
-    match client.post(url).header("x-goog-api-key", &key).json(&body).send().await {
-        Ok(resp) => {
+    if let Some(req) = ultra_req {
+        if let Ok(resp) = req.json(&body).send().await {
             if resp.status().is_success() {
-                "✦ Google AI Pro".to_string()
-            } else {
-                "Free Plan".to_string()
+                let text = resp.text().await.unwrap_or_default();
+                if !text.contains("limit: 0") && !text.contains("PERMISSION_DENIED") && !text.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+                    return AccountPlanTier::Ultra;
+                }
             }
         }
-        Err(_) => "Free Plan".to_string(),
     }
+
+    // 2. Probe Pro access (gemini-4-argon)
+    let pro_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent";
+    let pro_req = if tokens.access_token == "api_key_auth" {
+        get_gemini_api_key().map(|key| client.post(pro_url).header("x-goog-api-key", key))
+    } else {
+        Some(client.post(pro_url).bearer_auth(&tokens.access_token))
+    };
+
+    if let Some(req) = pro_req {
+        if let Ok(resp) = req.json(&body).send().await {
+            if resp.status().is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                if !text.contains("limit: 0") && !text.contains("PERMISSION_DENIED") && !text.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+                    return AccountPlanTier::Pro;
+                }
+            }
+        }
+    }
+
+    // Default: Basic / Free account
+    AccountPlanTier::Free
 }
 
 pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<Vec<ModelInfo>, String> {
