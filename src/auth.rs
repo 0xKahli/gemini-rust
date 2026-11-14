@@ -84,6 +84,21 @@ pub fn get_gemini_api_key() -> Option<String> {
     }
     None
 }
+
+pub fn save_gemini_api_key(key: &str) {
+    let p = get_config_dir().join("api_key.txt");
+    let _ = std::fs::write(&p, key.trim());
+
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(env) = hkcu.open_subkey_with_flags("Environment", KEY_WRITE) {
+            let _ = env.set_value("GEMINI_API_KEY", &key.trim().to_string());
+        }
+    }
+}
 const KEYRING_SERVICE: &str = "gemini-rust-client";
 const KEYRING_USER: &str = "oauth-tokens";
 const REDIRECT_PORT: u16 = 8765;
@@ -189,8 +204,19 @@ pub fn load_tokens() -> Option<TokenStore> {
 pub fn clear_tokens() {
     let path = get_config_dir().join("auth.json");
     let _ = std::fs::remove_file(&path);
+    let api_key_path = get_config_dir().join("api_key.txt");
+    let _ = std::fs::remove_file(&api_key_path);
     let avatar = get_config_dir().join("avatar.png");
     let _ = std::fs::remove_file(&avatar);
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(env) = hkcu.open_subkey_with_flags("Environment", KEY_WRITE) {
+            let _ = env.delete_value("GEMINI_API_KEY");
+        }
+    }
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
         let _ = entry.delete_credential();
     }
@@ -502,11 +528,23 @@ pub async fn detect_account_plan() -> String {
 
 pub async fn fetch_available_models(access_token: &str, is_pro: bool) -> Result<Vec<ModelInfo>, String> {
     let client = Client::new();
-    let mut resp = client
-        .get("https://generativelanguage.googleapis.com/v1beta/models")
-        .bearer_auth(access_token)
-        .send()
-        .await;
+    let mut resp = if access_token == "api_key_auth" {
+        if let Some(key) = get_gemini_api_key() {
+            client
+                .get("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", &key)
+                .send()
+                .await
+        } else {
+            return Err("No Gemini API key configured".to_string());
+        }
+    } else {
+        client
+            .get("https://generativelanguage.googleapis.com/v1beta/models")
+            .bearer_auth(access_token)
+            .send()
+            .await
+    };
 
     // If OAuth token is rejected (e.g. 403 scope insufficient), fall back to GEMINI_API_KEY if available
     let need_fallback = match &resp {

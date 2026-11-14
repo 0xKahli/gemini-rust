@@ -1,6 +1,6 @@
 use crate::auth::{
     clear_tokens, detect_account_plan, fetch_available_models, get_gemini_api_key, load_is_pro_plan,
-    load_tokens, refresh_access_token, save_is_pro_plan, start_login_flow, ModelInfo, TokenStore,
+    load_tokens, refresh_access_token, save_gemini_api_key, save_is_pro_plan, save_tokens, start_login_flow, ModelInfo, TokenStore,
 };
 use crate::gemini::{stream_message, AuthMethod};
 use crate::storage::{
@@ -243,6 +243,11 @@ pub struct GeminiApp {
     latex_cache: crate::latex::LatexCache,
     v_key_was_down: bool,
 
+    // API Key Login Fields
+    api_key_input: String,
+    show_api_key_text: bool,
+    api_key_login_error: Option<String>,
+
     // Runtime & async channels
     runtime: Arc<tokio::runtime::Runtime>,
     auth_rx: Option<mpsc::Receiver<AuthTaskResult>>,
@@ -328,6 +333,9 @@ impl GeminiApp {
             sparkle_texture: None,
             latex_cache: crate::latex::LatexCache::new(),
             v_key_was_down: false,
+            api_key_input: String::new(),
+            show_api_key_text: false,
+            api_key_login_error: None,
             runtime,
             auth_rx: None,
         }
@@ -700,6 +708,61 @@ impl GeminiApp {
         });
     }
 
+    pub fn login_with_api_key(&mut self, ctx: egui::Context) {
+        let key = self.api_key_input.trim().to_string();
+        if key.is_empty() {
+            self.api_key_login_error = Some("Please enter a valid Gemini API key".to_string());
+            return;
+        }
+
+        self.api_key_login_error = None;
+        self.auth_state = AuthState::LoggingIn;
+
+        let (tx, rx) = mpsc::channel::<AuthTaskResult>(4);
+        self.auth_rx = Some(rx);
+        let ctx_clone = ctx.clone();
+
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let test_url = "https://generativelanguage.googleapis.com/v1beta/models";
+            let resp = client
+                .get(test_url)
+                .header("x-goog-api-key", &key)
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    save_gemini_api_key(&key);
+                    let store = TokenStore {
+                        access_token: "api_key_auth".to_string(),
+                        refresh_token: None,
+                        expires_at: chrono::Utc::now() + chrono::Duration::days(3650),
+                        email: Some("Gemini API Key".to_string()),
+                        display_name: Some("API Key User".to_string()),
+                        picture_url: None,
+                    };
+                    save_tokens(&store);
+                    let _ = tx.send(AuthTaskResult::LoginSuccess(store)).await;
+                }
+                Ok(r) => {
+                    let status = r.status();
+                    let text = r.text().await.unwrap_or_default();
+                    let err_msg = if status.as_u16() == 400 || status.as_u16() == 403 {
+                        "Invalid Gemini API key. Please check your key at Google AI Studio.".to_string()
+                    } else {
+                        format!("Authentication error ({}): {}", status, text)
+                    };
+                    let _ = tx.send(AuthTaskResult::LoginError(err_msg)).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(AuthTaskResult::LoginError(format!("Network connection failed: {}", e))).await;
+                }
+            }
+            ctx_clone.request_repaint();
+        });
+    }
+
     fn fetch_models(&mut self, tokens: TokenStore, ctx: egui::Context) {
         let (tx, rx) = mpsc::channel::<AuthTaskResult>(8);
         self.auth_rx = Some(rx);
@@ -732,6 +795,9 @@ impl GeminiApp {
 
     fn refresh_token_if_needed(&mut self, ctx: egui::Context) {
         if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
+            if tokens.access_token == "api_key_auth" {
+                return;
+            }
             if tokens.is_expired() {
                 let tokens = tokens.clone();
                 let (tx, rx) = mpsc::channel::<AuthTaskResult>(2);
@@ -1155,32 +1221,140 @@ impl GeminiApp {
 
                     match &self.auth_state {
                         AuthState::LoggedOut => {
-                            let btn = ui.add_sized(
-                                Vec2::new(240.0, 48.0),
+                            // ── Option 1: Google Account Sign-In ──────────
+                            let google_btn = ui.add_sized(
+                                Vec2::new(320.0, 44.0),
                                 egui::Button::new(
                                     RichText::new("🔑  Sign in with Google")
-                                        .size(15.0)
+                                        .size(14.5)
                                         .color(Color32::WHITE),
                                 )
                                 .fill(Color32::from_rgb(26, 115, 232))
-                                .rounding(Rounding::same(24.0)),
+                                .rounding(Rounding::same(22.0)),
                             );
-                            if btn.clicked() {
+                            if google_btn.clicked() {
                                 self.start_login(ctx.clone());
                             }
+
+                            ui.add_space(16.0);
+
+                            // ── Divider ──────────────────────────────────
+                            ui.horizontal(|ui| {
+                                let w = (ui.available_width() - 320.0).max(0.0) / 2.0;
+                                ui.add_space(w);
+                                ui.set_width(320.0);
+                                ui.columns(3, |cols| {
+                                    cols[0].vertical_centered(|ui| {
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                    });
+                                    cols[1].vertical_centered(|ui| {
+                                        ui.label(RichText::new("OR").color(Color32::from_gray(120)).size(12.0).strong());
+                                    });
+                                    cols[2].vertical_centered(|ui| {
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                    });
+                                });
+                            });
+
+                            ui.add_space(16.0);
+
+                            // ── Option 2: API Key Login ──────────────────
+                            egui::Frame::none()
+                                .fill(Color32::from_rgb(27, 28, 32))
+                                .rounding(Rounding::same(16.0))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 48, 56)))
+                                .inner_margin(egui::Margin::symmetric(20.0, 18.0))
+                                .show(ui, |ui| {
+                                    ui.set_width(320.0);
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new("🔑 Login with API Key")
+                                                    .size(14.0)
+                                                    .color(Color32::WHITE)
+                                                    .strong(),
+                                            );
+                                        });
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new("Enter your Google AI Studio API key:")
+                                                .size(11.5)
+                                                .color(Color32::from_gray(160)),
+                                        );
+                                        ui.add_space(8.0);
+
+                                        let mut submitted_by_enter = false;
+                                        ui.horizontal(|ui| {
+                                            let edit = egui::TextEdit::singleline(&mut self.api_key_input)
+                                                .password(!self.show_api_key_text)
+                                                .hint_text("Paste key (AIzaSy…)")
+                                                .desired_width(245.0);
+                                            let response = ui.add(edit);
+                                            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                                submitted_by_enter = true;
+                                            }
+
+                                            let eye_icon = if self.show_api_key_text { "👁" } else { "👁‍🗨" };
+                                            if ui.add(
+                                                egui::Button::new(RichText::new(eye_icon).size(13.0))
+                                                    .fill(Color32::from_rgb(38, 40, 48))
+                                                    .rounding(Rounding::same(6.0)),
+                                            ).on_hover_text("Toggle key visibility").clicked() {
+                                                self.show_api_key_text = !self.show_api_key_text;
+                                            }
+                                        });
+
+                                        if let Some(ref err) = self.api_key_login_error {
+                                            ui.add_space(6.0);
+                                            ui.colored_label(Color32::from_rgb(255, 110, 110), RichText::new(err).size(11.5));
+                                        }
+
+                                        ui.add_space(12.0);
+
+                                        let api_btn = ui.add_sized(
+                                            Vec2::new(320.0, 38.0),
+                                            egui::Button::new(
+                                                RichText::new("Sign in with API Key")
+                                                    .size(13.5)
+                                                    .color(Color32::WHITE)
+                                                    .strong(),
+                                            )
+                                            .fill(Color32::from_rgb(45, 95, 175))
+                                            .rounding(Rounding::same(19.0)),
+                                        );
+                                        if api_btn.clicked() || submitted_by_enter {
+                                            self.login_with_api_key(ctx.clone());
+                                        }
+
+                                        ui.add_space(8.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("Need an API key?").size(11.0).color(Color32::from_gray(140)));
+                                            if ui.link(RichText::new("Get one free ↗").size(11.0).color(Color32::from_rgb(120, 190, 255))).clicked() {
+                                                let _ = webbrowser::open("https://aistudio.google.com/app/apikey");
+                                            }
+                                        });
+                                    });
+                                });
                         }
                         AuthState::LoggingIn => {
                             ui.spinner();
-                            ui.add_space(10.0);
+                            ui.add_space(12.0);
                             ui.label(
-                                RichText::new("Opening browser… complete sign-in there.")
+                                RichText::new("Connecting and verifying credentials…")
                                     .color(Color32::from_gray(190)),
                             );
                         }
                         AuthState::Error(e) => {
                             ui.colored_label(Color32::from_rgb(255, 100, 100), format!("⚠ {}", e));
-                            ui.add_space(12.0);
-                            if ui.button("Try again").clicked() {
+                            ui.add_space(14.0);
+                            if ui.add_sized(
+                                Vec2::new(180.0, 36.0),
+                                egui::Button::new(RichText::new("Back to Sign In").color(Color32::WHITE))
+                                    .fill(Color32::from_rgb(45, 48, 55))
+                                    .rounding(Rounding::same(18.0)),
+                            ).clicked() {
                                 self.auth_state = AuthState::LoggedOut;
                             }
                         }
@@ -1741,6 +1915,63 @@ impl GeminiApp {
                             .color(Color32::from_gray(140))
                             .size(11.0),
                     );
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    ui.label(RichText::new("🔑 Gemini API Key").strong().color(Color32::WHITE));
+                    let active_key = get_gemini_api_key().unwrap_or_default();
+                    let is_api_key_auth = if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
+                        tokens.access_token == "api_key_auth"
+                    } else {
+                        false
+                    };
+
+                    if is_api_key_auth {
+                        ui.colored_label(Color32::from_rgb(100, 220, 140), RichText::new("● Signed in with API Key").size(11.5).strong());
+                    } else if !active_key.is_empty() {
+                        ui.colored_label(Color32::from_rgb(120, 190, 255), RichText::new("● Backup API key configured").size(11.5));
+                    } else {
+                        ui.label(RichText::new("No custom API key saved").color(Color32::from_gray(140)).size(11.0));
+                    }
+                    ui.add_space(4.0);
+
+                    let mut current_input = if self.api_key_input.is_empty() { active_key.clone() } else { self.api_key_input.clone() };
+                    ui.horizontal(|ui| {
+                        let edit = egui::TextEdit::singleline(&mut current_input)
+                            .password(!self.show_api_key_text)
+                            .hint_text("Paste key (AIzaSy…)")
+                            .desired_width(ui.available_width() - 40.0);
+                        if ui.add(edit).changed() {
+                            self.api_key_input = current_input.clone();
+                        }
+                        let eye_icon = if self.show_api_key_text { "👁" } else { "👁‍🗨" };
+                        if ui.add(
+                            egui::Button::new(RichText::new(eye_icon).size(12.0))
+                                .fill(Color32::from_rgb(38, 40, 48))
+                                .rounding(Rounding::same(6.0)),
+                        ).on_hover_text("Toggle visibility").clicked() {
+                            self.show_api_key_text = !self.show_api_key_text;
+                        }
+                    });
+
+                    if !current_input.trim().is_empty() && current_input.trim() != active_key.trim() {
+                        ui.add_space(4.0);
+                        if ui.add_sized(
+                            Vec2::new(ui.available_width(), 30.0),
+                            egui::Button::new(RichText::new("💾 Save API Key").size(12.0).color(Color32::WHITE))
+                                .fill(Color32::from_rgb(45, 95, 175))
+                                .rounding(Rounding::same(6.0)),
+                        ).clicked() {
+                            save_gemini_api_key(&current_input);
+                            self.api_key_input = current_input.trim().to_string();
+                            if let AuthState::LoggedIn { tokens, .. } = &self.auth_state {
+                                let tokens_clone = tokens.clone();
+                                self.fetch_models(tokens_clone, ctx.clone());
+                            }
+                        }
+                    }
 
                     ui.add_space(16.0);
                     ui.separator();
